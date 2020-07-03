@@ -1,0 +1,15 @@
+current_model: ichi_cloud
+
+ichi_cloud:
+  indicators:
+    - ichimoku
+    - rsi
+  required_features:
+    - trend_ichimoku_conv
+    - trend_ichimoku_base
+    - trend_ichimoku_a
+    - trend_ichimoku_b
+    - trend_visual_ichimoku_a
+    - trend_visual_ichimoku_b
+    - chikou_span
+    - momentum_rsi
