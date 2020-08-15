@@ -2,14 +2,29 @@ current_model: ichi_cloud
 
 ichi_cloud:
   indicators:
-    - ichimoku
-    - rsi
-  required_features:
-    - trend_ichimoku_conv
-    - trend_ichimoku_base
-    - trend_ichimoku_a
-    - trend_ichimoku_b
-    - trend_visual_ichimoku_a
-    - trend_visual_ichimoku_b
-    - chikou_span
-    - momentum_rsi
+    ichimoku:
+      tenkan_period: 9
+      kijun_period: 26
+      chikou_period: 26
+      senkou_b_period: 52
+    rsi:
+      periods: 14
+  required_forex_data_features:
+    - trend_ichimoku_conv: float
+    - trend_ichimoku_base: float
+    - trend_ichimoku_a: float
+    - trend_ichimoku_b: float
+    - trend_visual_ichimoku_a: float
+    - trend_visual_ichimoku_b: float
+    - chikou_span: float
+    - momentum_rsi: float
+  required_training_data_features:
+    - date: str
+    - day: str
+    - week: int
+    - month: str
+    - quarter: int
+    - is_price_above_cb_lines: bool #cb as in conversion and base lines
+    - is_price_above_cloud: bool
+    - is_price_inside_cloud: bool
+    - is_price_below_cloud: bool

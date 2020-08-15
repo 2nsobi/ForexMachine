@@ -8,6 +8,7 @@ requires = [
     'numpy',
     'pandas',
     'pyyaml',
+    'PyQt5'
 ]
 
 # List of dependencies installed via `pip install -e ".[dev]"`
