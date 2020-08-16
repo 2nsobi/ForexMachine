@@ -132,4 +132,4 @@ dmypy.json
 .idea/
 
 #training data
-ForexMachine/Data/
+Data/
