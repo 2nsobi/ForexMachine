@@ -50,6 +50,9 @@ def add_datetimes(raw_data: pd.DataFrame) -> None:
     datetimes = list(map(lambda row: datetime.strptime(f'{row.Date} {row.Time}', '%Y.%m.%d %H:%M'),
                          raw_data.itertuples()))
     raw_data['datetime'] = datetimes
+    from collections import namedtuple
+    x = namedtuple('ichimoku_features', 'is_price_above_cb_lines is_price_above_cloud'
+                                        'is_price_inside_cloud is_price_below_cloud cloud_top cloud_bottom')
 
 
 # is just copy of Close column 26 periods in the past on default settings
