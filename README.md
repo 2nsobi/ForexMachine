@@ -1,2 +1,2 @@
 # ForexMachine
-money bot
+money bot hopefully 🤞
