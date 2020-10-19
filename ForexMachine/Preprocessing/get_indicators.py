@@ -8,9 +8,18 @@ from ForexMachine.util import PACKAGE_ROOT, yaml_to_dict
 from datetime import datetime
 
 
+def save_data_with_indicators(df: pd.DataFrame, filename: Optional[str] = None) -> None:
+    if not filename:
+        filename = 'no_name_data_with_indicators'
+
+    filepath = PACKAGE_ROOT.parent / f'Data/DataWithIndicators/{filename}.csv'
+    df.to_csv(filepath)
+
+
 def add_indicators_to_raw(filepath: str, config: dict, broker: Optional[str] = 'tw',
                           save_to_disk: Optional[bool] = False,
                           file_save_name: Optional[str] = None) -> pd.DataFrame:
+
     # edit column names for raw data from different brokers
     raw_data = None
     column_headers = []
@@ -85,20 +94,22 @@ def add_rsi(df: pd.DataFrame, periods: int = 14) -> None:
 
 
 if __name__ == '__main__':
-    # parser = ap.ArgumentParser()
-    # parser.add_argument('filepath')
-    # parser.add_argument('-b', '--broker', dest='broker', default='tw')
-    # parser.add_argument('-s', '--save', dest='save_to_disk', action='store_true')
-    # parser.add_argument('-n', '--name', dest='file_save_name')
-    # parser.add_argument('-c', '--config', dest='config_path')
-    # args = parser.parse_args()
-    #
-    # filepath = args.filepath
-    # broker = args.broker
-    # save_to_disk = args.save_to_disk
-    # file_save_name = args.file_save_name
-    # config_path = args.config_path
+    parser = ap.ArgumentParser()
+    parser.add_argument('filepath')
+    parser.add_argument('-b', '--broker', dest='broker', default='tw')
+    parser.add_argument('-s', '--save', dest='save_to_disk', action='store_true')
+    parser.add_argument('-n', '--name', dest='file_save_name')
+    parser.add_argument('-c', '--config', dest='config_path')
+    args = parser.parse_args()
+
+    filepath = args.filepath
+    broker = args.broker
+    save_to_disk = args.save_to_disk
+    file_save_name = args.file_save_name
+    config_path = args.config_path
+
     config = yaml_to_dict()  # config = yaml_to_dict(config_path)
-    print(config)
-    # add_indicators_to_raw(filepath=filepath, config=config, broker=broker, save_to_disk=save_to_disk,
-    #                       file_save_name=file_save_name)
+    # print(config)
+
+    add_indicators_to_raw(filepath=filepath, config=config, broker=broker, save_to_disk=save_to_disk,
+                          file_save_name=file_save_name)
