@@ -9,6 +9,7 @@ def make_data_directory() -> None:
     (PACKAGE_ROOT / f'Data/DataWithIndicators/').mkdir(parents=True, exist_ok=True)
     (PACKAGE_ROOT / f'Data/RawData/').mkdir(parents=True, exist_ok=True)
     (PACKAGE_ROOT / f'Data/TrainingData/').mkdir(parents=True, exist_ok=True)
+    (PACKAGE_ROOT / f'Data/.NumpyData/').mkdir(parents=True, exist_ok=True)
 
 
 def yaml_to_dict(yaml_path: Optional[str] = (PACKAGE_ROOT / 'Config/main_config.yml')) -> dict:
