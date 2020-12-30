@@ -131,5 +131,6 @@ dmypy.json
 # pycharm
 .idea/
 
-#training data
+#my stuff
 Data/
+my_stuff/

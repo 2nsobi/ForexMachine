@@ -1,0 +1,10 @@
+numpy
+pandas
+matplotlib
+scikit-learn
+xgboost
+MetaTrader5
+ta
+PyQt5
+gym
+stable-baselines

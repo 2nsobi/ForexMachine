@@ -9,11 +9,7 @@ import os
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-import time
-import re
 import numpy as np
-import shutil
-
 
 def save_data_with_indicators(df: pd.DataFrame, filename: Optional[str] = None,
                               save_indices: Optional[bool] = False) -> None:
@@ -102,25 +98,35 @@ def add_rsi(df: pd.DataFrame, periods: int = 14) -> None:
     df['momentum_rsi'] = ta.momentum.RSIIndicator(close=df['Close'], window=periods).rsi()
 
 
-def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=False, filepath=None, overwrite=False):
-    match = re.match(r'(\w)(\d+)', resolution, re.ASCII)
-    if not match or len(match.group(0)) != len(resolution):
-        print(f'"{resolution}" is not a valid resolution')
-        return
-
-    time_period = match.group(1).lower()
-    sub_periods_per_tick = int(match.group(2))
-    sub_period_count = 0
-    time_period_funcs = {
-        'm': lambda x: x.minute,
-        'h': lambda x: x.hour,
-        'd': lambda x: x.day,
-        'w': lambda x: x.weekday() // 6 + sub_period_count
+def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=False, filepath=None):
+    time_frames = {
+        'm1': mt5.TIMEFRAME_M1,
+        'm2': mt5.TIMEFRAME_M2,
+        'm3': mt5.TIMEFRAME_M3,
+        'm4': mt5.TIMEFRAME_M4,
+        'm5': mt5.TIMEFRAME_M5,
+        'm6': mt5.TIMEFRAME_M6,
+        'm10': mt5.TIMEFRAME_M10,
+        'm12': mt5.TIMEFRAME_M12,
+        'm15': mt5.TIMEFRAME_M15,
+        'm20': mt5.TIMEFRAME_M20,
+        'm30': mt5.TIMEFRAME_M30,
+        'h1': mt5.TIMEFRAME_H1,
+        'h2': mt5.TIMEFRAME_H2,
+        'h3': mt5.TIMEFRAME_H3,
+        'h4': mt5.TIMEFRAME_H4,
+        'h6': mt5.TIMEFRAME_H6,
+        'h8': mt5.TIMEFRAME_H8,
+        'h12': mt5.TIMEFRAME_H12,
+        'w1': mt5.TIMEFRAME_W1,
+        'mn1': mt5.TIMEFRAME_MN1,
     }
-    if time_period not in time_period_funcs or sub_periods_per_tick < 1:
-        print(f'"{resolution}" is not a valid resolution')
+
+    if resolution.lower() not in time_frames:
+        print(f'"{resolution}" is not a valid chart time frame')
         return
-    get_sub_period = time_period_funcs[time_period]
+    resolution = resolution.lower()
+    time_frame = time_frames[resolution]
 
     if not mt5_initialized:
         res = mt5.initialize(portable=True)
@@ -138,10 +144,9 @@ def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=
                         second=end_time.second, tzinfo=timezone.utc)
 
     dt_save_form = '%Y-%m-%dT%H;%M%Z'
-    default_filepath = PACKAGE_ROOT.parent / f'Data/RawData/mt5_{symbol}_{resolution}_ticks_' \
-                                             f'{start_time.strftime(dt_save_form)}_to_{end_time.strftime(dt_save_form)}.csv'
     if not filepath:
-        filepath = default_filepath
+        filepath = PACKAGE_ROOT.parent / f'Data/RawData/mt5_{symbol}_{resolution}_ticks_' \
+                                             f'{start_time.strftime(dt_save_form)}_to_{end_time.strftime(dt_save_form)}.csv'
     else:
         filepath = Path(filepath).resolve()
 
@@ -149,132 +154,100 @@ def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=
         print(f'will be unable to save to {filepath} because {filepath.parent} does not exist, returning')
         return
 
-    if default_filepath.is_file() and filepath == default_filepath and not overwrite:
-        print(f'{symbol} {resolution} tick data already saved at {default_filepath}')
-    elif default_filepath.is_file() and filepath != default_filepath and not overwrite:
-        shutil.copy(default_filepath, filepath)
-        print(f'copied already saved {symbol} {resolution} tick data from {default_filepath} to {filepath}')
+    ticks_cache_path = Path(PACKAGE_ROOT.parent / f'Data/.cache/mt5_{symbol}_{resolution}_ticks_'
+                                                  f'{start_time.strftime(dt_save_form)}_to_{end_time.strftime(dt_save_form)}.csv')
+
+    if not ticks_cache_path.parent.is_dir():
+        print(f'{ticks_cache_path.parent} does not exist, returning')
+        return
+
+    if ticks_cache_path.is_file():
+        ticks_df = pd.read_csv(ticks_cache_path, index_col=None)
+        print(f'loaded {len(ticks_df)} rows of tick data from {ticks_cache_path}')
     else:
-        ticks_numpy = Path(PACKAGE_ROOT.parent / f'Data/.NumpyData/mt5_{symbol}_{resolution}_ticks_'
-                                                 f'{start_time.strftime(dt_save_form)}_to_{end_time.strftime(dt_save_form)}.npy')
+        time_skip = timedelta(days=365)
+        retries = 0
+        files_to_merge = []
+        while cur_start_time < end_time:
+            cur_end_time = cur_start_time + time_skip
+            cur_end_time = min((cur_end_time - cur_start_time, cur_end_time), (end_time - cur_start_time, end_time),
+                               key=lambda tup: tup[0])[1]
 
-        if not ticks_numpy.parent.is_dir():
-            print(f'{ticks_numpy.parent} does not exist, returning')
-            return
+            cur_ticks_batch = mt5.copy_rates_range(symbol, time_frame, cur_start_time, cur_end_time)
+            if cur_ticks_batch is not None:
+                if len(cur_ticks_batch) == 0:
+                    print(f'no tick data returned by mt5 terminal for time range of {cur_start_time} '
+                          f'to {cur_end_time}')
 
-        if ticks_numpy.is_file():
-            ticks = np.load(ticks_numpy)
-            print(f'loaded {len(ticks)} rows of tick data from {ticks_numpy}')
-        else:
-            ticks = None
-            a_year = timedelta(days=365)
-            while cur_start_time < end_time:
-                cur_end_time = cur_start_time + a_year
-                cur_end_time = min((cur_end_time - cur_start_time, cur_end_time), (end_time - cur_start_time, end_time),
-                                   key=lambda tup: tup[0])[1]
+            res = mt5.last_error()
+            if res[0] == 1:
+                print(f'successfully retrieved {len(cur_ticks_batch)} rows of tick data '
+                      f'for time range of {cur_start_time} to {cur_end_time}')
+            # "No IPC connection" error
+            elif res[0] == -10004:
+                print(f'{res} lost connection to mt5 terminal')
 
-                # "The first call of CopyTicks() initiates synchronization of the symbol's tick database stored
-                # on the hard disk. CopyTicks() is the mql C function that is called from inside copy_ticks_range()
-                # probably, so just call it 3 times to be safe
-                for i in range(3):
-                    cur_ticks_batch = mt5.copy_ticks_range(symbol, cur_start_time, cur_end_time, mt5.COPY_TICKS_ALL)
-                    if cur_ticks_batch is not None:
-                        if len(cur_ticks_batch) == 0:
-                            print(
-                                f'no tick data returned by mt5 terminal for time range of {cur_start_time} to {cur_end_time}')
-                        break
-                    time.sleep(0.5)
-
-                res = mt5.last_error()
-                if res[0] == 1:
-                    print(f'successfully retrieved {len(cur_ticks_batch)} rows of tick data '
-                          f'for time range of {cur_start_time} to {cur_end_time}')
-                # "No IPC connection" error
-                elif res[0] == -10004:
-                    print(f'{res} lost connection to mt5 terminal, retrying...')
+                if retries < 3:
+                    print('retrying...')
                     if not mt5.initialize(portable=True):
                         print('failed to initialize MT5 terminal')
                         return
+                    retries += 1
                     continue
-                else:
-                    print(f'{res} failed to download tick data for time range of {cur_start_time} to {cur_end_time}')
+            # any other mt5 error: https://www.mql5.com/en/docs/integration/python_metatrader5/mt5lasterror_py
+            else:
+                print(f'failed to retrieve tick data from MT5 terminal for {symbol} {resolution} data for '
+                      f'time range of {cur_start_time} to {cur_end_time}')
+                print('error from mt5:')
+                print(res)
+                if retries < 3:
+                    retries += 1
+                    print('retrying...')
+                    continue
 
-                if cur_ticks_batch is not None and len(cur_ticks_batch) > 0:
-                    if ticks is None:
-                        ticks = cur_ticks_batch
-                    else:
-                        # the first axis is the outer most grouping (rows when working with a 2d array)
-                        ticks = np.append(ticks, cur_ticks_batch, axis=0)
+            # temporarily save data from mt5 terminal because it can sometimes run out of memory if RAM is close to max
+            if cur_ticks_batch is not None and len(cur_ticks_batch) > 0:
+                temp_cache_path = Path(PACKAGE_ROOT.parent / f'Data/.cache/temp_mt5_{symbol}_{resolution}_ticks_'
+                                                             f'{cur_start_time.strftime(dt_save_form)}_to_{cur_end_time.strftime(dt_save_form)}.npy')
+                np.save(temp_cache_path, cur_ticks_batch)
+                files_to_merge.append(temp_cache_path)
 
-                cur_start_time += a_year
+            cur_start_time += time_skip
+            retries = 0
 
-            np.save(ticks_numpy, arr=ticks)
-            print(f'saved {len(ticks)} rows of tick data to {ticks_numpy}')
+        ticks = None
+        if len(files_to_merge) > 0:
+            ticks = np.load(files_to_merge[0])
+            if len(files_to_merge) > 1:
+                print('starting to concatenate all downloaded data...')
+                for i, file_path in enumerate(files_to_merge[1:]):
+                    ticks_to_append = np.load(file_path)
+                    ticks = np.append(ticks, ticks_to_append, axis=0)
+                    print(f'concatenated {i + 2}/{len(files_to_merge)} downloaded datasets')
 
-            if not mt5_initialized:
-                mt5.shutdown()
+            for file_path in files_to_merge:
+                os.remove(file_path)
+        else:
+            print('no tick data retrieved, done.')
+            return
 
-        # for d in [(datetime.utcfromtimestamp(ticks[i][0]).isoformat(), ticks[i][1]) for i in range(20)]:
-        #     print(d)
+        ticks = ticks.tolist()
+        # row[1:-1] should get all tick data besides the date and 'real_volume' column
+        formatted_ticks = [(datetime.utcfromtimestamp(row[0]), *row[1:-1]) for row in ticks]
+        ticks_df = pd.DataFrame(formatted_ticks, columns=['datetime', 'Open', 'High', 'Low',
+                                                          'Close', 'Volume', 'spread'])
 
-        def utc_dt_no_seconds(d):
-            return datetime(d.year, d.month, d.day, hour=d.hour, minute=d.minute, tzinfo=timezone.utc)
+        # remove any duplicate datetimes (most likely caused by using timedelta)
+        ticks_df.drop_duplicates(subset=['datetime'], inplace=True)
 
-        column_idx = {name: i for i, name in enumerate(ticks.dtype.names)}
-        last_sub_period = None
-        last_dt = datetime.utcfromtimestamp(ticks[0][column_idx['time']])
-        new_ticks = []
-        last_open = last_high = last_low = last_bid = ticks[0][column_idx['bid']]
+        ticks_df.to_csv(ticks_cache_path, index=False)
+        print(f'saved {len(ticks_df)} rows of tick data to {ticks_cache_path}')
 
-        zero_open = True
-        if last_open != 0:
-            zero_open = False
+    ticks_df.to_csv(filepath, index=False)
+    print(f'saved {ticks_df.shape[0]} rows of {symbol} {resolution} tick data to {filepath}, done.')
 
-        print('starting parsing all tick data...')
-        last_percent = 0
-
-        for i, tick in enumerate(ticks):
-            dt = datetime.utcfromtimestamp(tick[column_idx['time']])
-            sub_period = get_sub_period(dt)
-            bid = tick[column_idx['bid']]
-
-            if last_sub_period is not None and sub_period != last_sub_period:
-                sub_period_count += 1
-
-                if sub_period_count % sub_periods_per_tick == 0:
-                    if not (last_open == last_bid == 0):
-                        new_ticks.append((utc_dt_no_seconds(last_dt), last_open, last_high, last_low, last_bid))
-
-                    last_open = last_high = last_low = last_bid = bid
-                    if last_open == 0:
-                        zero_open = True
-
-                    last_dt = dt
-
-            if bid != 0:
-                if zero_open:
-                    last_open = last_high = last_low = last_bid = bid
-                    zero_open = False
-                else:
-                    if bid > last_high:
-                        last_high = bid
-                    if bid < last_low:
-                        last_low = bid
-                    last_bid = bid
-
-            last_sub_period = sub_period
-
-            percent_done = int(((i + 1) / len(ticks) * 100))
-            if percent_done != last_percent and percent_done % 10 == 0:
-                print(f'done parsing {percent_done}% of tick data')
-            last_percent = percent_done
-
-        new_ticks.append((utc_dt_no_seconds(last_dt), last_open, last_high, last_low, last_bid))
-
-        data = pd.DataFrame(new_ticks, columns=['datetime', 'Open', 'High', 'Low', 'Close'])
-        data.to_csv(filepath, index=False)
-
-        print(f'saved {data.shape[0]} rows of {symbol} {resolution} tick data to {filepath}')
+    if not mt5_initialized:
+        mt5.shutdown()
 
     return filepath
 
