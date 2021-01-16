@@ -71,9 +71,13 @@ def add_datetimes(raw_data: pd.DataFrame) -> None:
 
 # is just copy of Close column 26 periods in the past on default settings
 def add_chikou_span(raw_data: pd.DataFrame, delay_periods: int = 26) -> None:
-    c_span = raw_data['Close'].to_list()[delay_periods:]
-    c_span.extend([None] * delay_periods)
-    raw_data['chikou_span'] = c_span
+    c_span = [None] * delay_periods
+    c_span.extend(raw_data['Close'].to_list()[:-delay_periods])
+    raw_data['chikou_span'] = c_span        # this will just be the value of close @ i - delay_periods
+
+    c_span_vis = raw_data['Close'].to_list()[delay_periods:]
+    c_span_vis.extend([None] * delay_periods)
+    raw_data['chikou_span_visual'] = c_span_vis
 
 
 def add_ichimoku_cloud(df: pd.DataFrame, chikou_period: int = 26, tenkan_period: int = 9, kijun_period: int = 26,
@@ -99,7 +103,7 @@ def add_rsi(df: pd.DataFrame, periods: int = 14) -> None:
 
 
 def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=False, filepath=None):
-    time_frames = {
+    timeframes = {
         'm1': mt5.TIMEFRAME_M1,
         'm2': mt5.TIMEFRAME_M2,
         'm3': mt5.TIMEFRAME_M3,
@@ -122,11 +126,11 @@ def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=
         'mn1': mt5.TIMEFRAME_MN1,
     }
 
-    if resolution.lower() not in time_frames:
+    if resolution.lower() not in timeframes:
         print(f'"{resolution}" is not a valid chart time frame')
         return
     resolution = resolution.lower()
-    time_frame = time_frames[resolution]
+    time_frame = timeframes[resolution]
 
     if not mt5_initialized:
         res = mt5.initialize(portable=True)

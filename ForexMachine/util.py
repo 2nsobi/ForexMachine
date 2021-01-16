@@ -5,6 +5,13 @@ import yaml
 PACKAGE_ROOT = Path(__file__).parent.resolve()
 
 
+def create_folder(path):
+    path = Path(path)
+    if not path.is_dir():
+        path.mkdir(parents=True)
+    return path
+
+
 def make_data_directory() -> None:
     (PACKAGE_ROOT / f'Data/DataWithIndicators/').mkdir(parents=True, exist_ok=True)
     (PACKAGE_ROOT / f'Data/RawData/').mkdir(parents=True, exist_ok=True)

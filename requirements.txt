@@ -6,5 +6,5 @@ xgboost
 MetaTrader5
 ta
 PyQt5
-gym
-stable-baselines
+# gym
+# stable-baselines
