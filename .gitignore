@@ -131,6 +131,7 @@ dmypy.json
 # pycharm
 .idea/
 
-#my stuff
+# my stuff
 Data/
 my_stuff/
+PackageData/

@@ -1,41 +1,54 @@
 from pathlib import Path
 from typing import Optional
-import yaml
+import logging
+import linecache
+import inspect
 
-PACKAGE_ROOT = Path(__file__).parent.resolve()
+PACKAGE_ROOT_DIR = Path(__file__).parent.resolve()
+TICKS_DATA_DIR = PACKAGE_ROOT_DIR / './PackageData/TicksData'
+MODEL_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/ModelFiles'
+LIVE_TRADE_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/LiveTradingFiles'
+TEMP_DIR = PACKAGE_ROOT_DIR / './PackageData/.temp'
+
+
+class Logger:
+    __logger_instance = None
+
+    @staticmethod
+    def get_instance():
+        if Logger.__logger_instance is None:
+            logging.basicConfig(format=('%(filename)s: '
+                                        '%(levelname)s: '
+                                        '%(funcName)s(): '
+                                        '%(lineno)d:\t'
+                                        '%(message)s')
+                                )
+            Logger.__logger_instance = logging.getLogger(__name__)
+        return Logger.__logger_instance
 
 
 def create_folder(path):
     path = Path(path)
     if not path.is_dir():
         path.mkdir(parents=True)
-    return path
+    return path.resolve()
 
 
-def make_data_directory() -> None:
-    (PACKAGE_ROOT / f'Data/DataWithIndicators/').mkdir(parents=True, exist_ok=True)
-    (PACKAGE_ROOT / f'Data/RawData/').mkdir(parents=True, exist_ok=True)
-    (PACKAGE_ROOT / f'Data/TrainingData/').mkdir(parents=True, exist_ok=True)
-    (PACKAGE_ROOT / f'Data/.cache/').mkdir(parents=True, exist_ok=True)
+def get_ticks_data_dir():
+    create_folder(TICKS_DATA_DIR)
+    return TICKS_DATA_DIR
 
 
-def yaml_to_dict(yaml_path: Optional[str] = (PACKAGE_ROOT / 'Config/main_config.yml')) -> dict:
-    # if get_indicators is run from command line and yaml path is not give argparse will pass None as yaml_path
-    if not yaml_path:
-        yaml_path = PACKAGE_ROOT / 'Config/main_config.yml'
-
-    # yaml.add_constructor('!datetime',datetime.datetime)
-
-    with open(yaml_path, 'r') as configYAML:
-        yaml_dict = yaml.safe_load(configYAML)
-    return yaml_dict
+def get_model_files_dir():
+    create_folder(MODEL_FILES_DIR)
+    return MODEL_FILES_DIR
 
 
-def string_to_type(string: str) -> type:
-    types = {
-        'str': str,
-        'int': int,
-        'float': float,
-        'bool': bool
-    }
-    return type(types[string])
+def get_live_trade_files_dir():
+    create_folder(LIVE_TRADE_FILES_DIR)
+    return LIVE_TRADE_FILES_DIR
+
+
+def get_temp_dir():
+    create_folder(TEMP_DIR)
+    return TEMP_DIR
