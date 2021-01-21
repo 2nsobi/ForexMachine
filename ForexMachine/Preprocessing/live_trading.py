@@ -6,7 +6,6 @@ from sklearn.preprocessing import OneHotEncoder
 from datetime import timedelta, timezone
 from pandas import Timestamp
 import numpy as np
-import time
 from typing import Optional
 
 logger = util.Logger.get_instance()
@@ -65,7 +64,8 @@ class LiveFeatureGenerator:
             indicator_dict = {}
             for setting in self.default_settings[indicator]:
                 value = self.default_settings[indicator][setting]
-                if self.custom_settings is not None and setting in self.custom_settings[indicator]:
+                if self.custom_settings is not None \
+                        and indicator in self.custom_settings and setting in self.custom_settings[indicator]:
                     value = self.custom_settings[indicator][setting]
                 indicator_dict[setting] = value
             indicator_dict['func'] = self.available_indicators_funcs[indicator]
@@ -79,7 +79,8 @@ class LiveFeatureGenerator:
             feature_dict = {}
             for setting in self.default_settings[feature]:
                 value = self.default_settings[feature][setting]
-                if self.custom_settings is not None and setting in self.custom_settings[feature]:
+                if self.custom_settings is not None \
+                        and feature in self.custom_settings and setting in self.custom_settings[feature]:
                     value = self.custom_settings[feature][setting]
                 feature_dict[setting] = value
             feature_dict['func'] = self.available_features_funcs[feature]
@@ -111,6 +112,19 @@ class LiveFeatureGenerator:
             for feature in self.features:
                 self.features[feature]['func'](i)
 
+        return True
+
+    def process_new_bar(self, new_bar):
+        self.data_q.append(list(new_bar))
+        self.data_q.popleft()
+        data_idx = len(self.data_q) - 1
+        self.add_temporal_features(data_idx)
+        # calculate indicators first
+        for indicator in self.indicators:
+            self.indicators[indicator]['func'](data_idx)
+        # then generate other features because they can depend in indicators
+        for feature in self.features:
+            self.features[feature]['func'](data_idx)
         return True
 
     def add_temporal_features(self, data_idx):
@@ -215,7 +229,6 @@ class LiveFeatureGenerator:
                 'trend_ichimoku_b': 'senkou_b',
                 'trend_ichimoku_conv': 'tenken_conv',
                 'trend_ichimoku_base': 'kijun_base',
-                'chikou_span': 'chikou_span'
             }
             self.research_feature_generator = FeatureGenerator(self.data_q, self.feature_indices,
                                                                live_trading=True,
@@ -287,20 +300,106 @@ class LiveFeatureGenerator:
 
 
 if __name__ == '__main__':
+    import time
+    import pandas as pd
+    from ForexMachine.Preprocessing import research
+
     mt5.initialize()
 
-    rates = mt5.copy_rates_from_pos('EURUSD', mt5.TIMEFRAME_H1, 0, 200)
+    rates = mt5.copy_rates_from_pos('EURUSD', mt5.TIMEFRAME_H1, 1, 200)
 
-    lfg = LiveFeatureGenerator(indicators=['ichimoku'], features=['ichimoku_signals'], utc_offset=2)
+    custom_settings = {
+        'ichimoku': {
+            'tenkan_period': 9,
+            'kijun_period': 30,
+            'chikou_period': 30,
+            'senkou_b_period': 60
+        }
+    }
+
+    lfg = LiveFeatureGenerator(indicators=['ichimoku'], features=['ichimoku_signals'], utc_offset=2,
+                               custom_settings=custom_settings)
 
     s = time.time()
     lfg.process_first_bars(rates)
-    d = (time.time()-s)*1000
+    d = (time.time() - s) * 1000
 
-    for i, row in enumerate(lfg.data_q):
-        print(i, len(row), row)
-    print(lfg.feature_indices)
-    print(d)
+    # for i, row in enumerate(lfg.data_q):
+    #     print(i, len(row), row)
+    # print(lfg.feature_indices)
+    # print(d)
 
+    # new_bar = mt5.copy_rates_from_pos('EURUSD', mt5.TIMEFRAME_H1, 0, 1)[0]
+    #
+    # lfg.process_new_bar(new_bar)
+    #
+    # for i, row in enumerate(lfg.data_q):
+    #     print(i, len(row), row)
+
+    lfg_df = pd.DataFrame(lfg.data_q, columns=list(lfg.feature_indices.keys()))
+    lfg_df.to_csv('lfg_df.csv')
+    print(lfg_df)
+
+    from_dt = Timestamp(rates[0][0], unit='s', tzinfo=timezone.utc)
+    to_dt = Timestamp(rates[-1][0], unit='s', tzinfo=timezone.utc)
+    print(from_dt.isoformat())
+    print(to_dt.isoformat())
+
+    indicators_info = {
+        'ichimoku': custom_settings['ichimoku'],
+        'rsi': {
+            'periods': 14
+        }
+    }
+
+    tick_data_filepath = research.download_mt5_data('EURUSD', 'H1', from_dt.isoformat(), to_dt.isoformat())
+    data_with_indicators = research.add_indicators_to_raw(filepath=tick_data_filepath,
+                                                          indicators_info=indicators_info,
+                                                          datetime_col='datetime')
+    train_data = research.add_ichimoku_features(data_with_indicators)
+    train_data.to_csv('train_data.csv')
+    print(train_data)
+
+    lfg_df_cols = set(lfg_df.columns)
+    train_data_cols = set(train_data.columns)
+
+    lfg_to_train_data_col_names = {
+        'senkou_a_visual': 'trend_visual_ichimoku_a',
+        'senkou_b_visual': 'trend_visual_ichimoku_b',
+        'senkou_a': 'trend_ichimoku_a',
+        'senkou_b': 'trend_ichimoku_b',
+        'tenken_conv': 'trend_ichimoku_conv',
+        'kijun_base': 'trend_ichimoku_base',
+    }
+
+    non_matching = 0
+    for col in lfg_df_cols:
+        if col in train_data_cols or col in lfg_to_train_data_col_names:
+            for i in range(lfg_df.shape[0]):
+                lfg_df_val = lfg_df.iloc[i][lfg_df.columns.get_loc(col)]
+                if not pd.isnull(lfg_df_val):
+                    train_data_col_name = col
+                    if col in lfg_to_train_data_col_names:
+                        train_data_col_name = lfg_to_train_data_col_names[col]
+                    train_data_val = train_data.iloc[i][train_data.columns.get_loc(train_data_col_name)]
+                    if isinstance(lfg_df_val, (np.floating, float)):
+                        if not np.isclose(lfg_df_val, train_data_val):
+                            print(f'non-matching data in col "{col}" and row {i}, rows:')
+                            print(list(lfg_df.iloc[i]))
+                            print(list(train_data.iloc[i]))
+                            print(lfg_df_val)
+                            print(train_data_val)
+                            non_matching += 1
+                    else:
+                        if lfg_df_val != train_data_val:
+                            print(f'non-matching data in col "{col}" and row {i}, rows:')
+                            print(list(lfg_df.iloc[i]))
+                            print(list(train_data.iloc[i]))
+                            print(lfg_df_val)
+                            print(train_data_val)
+                            non_matching += 1
+    print(f'non_matching: {non_matching}')
+    print(lfg_df.shape)
+    print(train_data.shape)
 
     mt5.shutdown()

@@ -181,7 +181,7 @@ class TradeStrategy:
                     logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
                     return False
 
-            self.process_latest_completed_bar(latest_bars[-2])
+            self.process_new_bar(latest_bars[-2])
 
             next_update_delta = self.get_next_update_delta(latest_bars[-1][0])
             if next_update_delta > 0:
@@ -197,7 +197,7 @@ class TradeStrategy:
     def init_bars_buffer(self, first_bars):
         pass
 
-    def process_current_bar(self, bar_data):
+    def process_new_bar(self, new_bar):
         pass
 
 
@@ -315,10 +315,10 @@ class IchiCloudStrategy(TradeStrategy):
             print(r)
         print('done init_bars_buffer')
 
-    def process_latest_completed_bar(self, bar_data):
-        print('start process_latest_completed_bar')
-        print((datetime.fromtimestamp(bar_data[0], tz=timezone.utc) - timedelta(hours=self.utc_offset)), bar_data)
-        print('done process_latest_completed_bar')
+    def process_new_bar(self, new_bar):
+        print('start process_new_bar')
+        print((datetime.fromtimestamp(new_bar[0], tz=timezone.utc) - timedelta(hours=self.utc_offset)), new_bar)
+        print('done process_new_bar')
 
 
 def run_trade_strategy(strategy, strategy_kwargs, strat_name, proc_conn, mt5_login_info, exit_event):

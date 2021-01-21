@@ -13,6 +13,8 @@ from collections import namedtuple
 import tensorflow as tf
 from sklearn.preprocessing import OneHotEncoder
 
+logger = util.Logger.get_instance()
+
 TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2011-01-01', '2020-10-01'
 
 
@@ -70,10 +72,10 @@ class FeatureGenerator:
         # - cross signal strength indicated by 0, 1, 2, 3 for none, weak, neutral, strong
         #    or just 0, 1, 3 for none, weak, strong
         # - cross length is just the number of ticks the cross occured over
-        tk_cross = (0, 0, 0)
-        tk_price_cross = (0, 0, 0)
-        senkou_cross = (0, 0, 0)
-        chikou_cross = (0, 0, 0)
+        tk_cross = (None, None, None)
+        tk_price_cross = (None, None, None)
+        senkou_cross = (None, None, None)
+        chikou_cross = (None, None, None)
         cloud_breakout_bull = False
         cloud_breakout_bear = False
 
@@ -118,8 +120,7 @@ class FeatureGenerator:
 
             # price cross clean through both tk region (cross == 2), or price cross through both
             # tk region over limited amout of ticks (cross == 3 and length <= cross_length_limit)
-            if cross == 2 \
-                    or (cross == 3 and length <= cross_length_limit):
+            if cross == 2 or (cross == 3 and length <= cross_length_limit):
 
                 # bullish
                 if top_line_i == trend_ichimoku_conv:
@@ -140,7 +141,10 @@ class FeatureGenerator:
                     else:
                         tk_cross = (0, 1, length)
                 else:
-                    print('weird 5:', self.data[i][self.feature_indices[self.datetime_feat_name]])
+                    logger.warning(f'weird tk_cross situation occurred (data i={i})')
+                    tk_cross = (0, 0, 0)
+            else:
+                tk_cross = (0, 0, 0)
 
             ### tk price cross
 
@@ -159,15 +163,21 @@ class FeatureGenerator:
                         tk_price_cross = (3, 0, length)
                     elif self.data[i][close] <= self.data[i][cloud_bottom]:
                         tk_price_cross = (1, 0, length)
+                    else:
+                        tk_price_cross = (0, 0, 0)
                 # bearish
                 elif fourth_line == close:
                     if self.data[i][close] >= self.data[i][cloud_top]:
                         tk_price_cross = (0, 1, length)
                     elif self.data[i][close] <= self.data[i][cloud_bottom]:
                         tk_price_cross = (0, 3, length)
-            elif cross == 3 and length > cross_length_limit:
-                print(f'cross type = {cross}, cross length = {length}, '
-                      f'{self.data[i][self.feature_indices[self.datetime_feat_name]]}')
+                    else:
+                        tk_price_cross = (0, 0, 0)
+                else:
+                    logger.warning(f'weird tk_price_cross situation occurred (data i={i})')
+                    tk_price_cross = (0, 0, 0)
+            else:
+                tk_price_cross = (0, 0, 0)
 
             ### senkou (cloud) cross
 
@@ -199,7 +209,10 @@ class FeatureGenerator:
                     else:
                         senkou_cross = (0, 1, length)
                 else:
-                    print('weird 55:', self.data[i][self.feature_indices[self.datetime_feat_name]])
+                    logger.warning(f'weird senkou_cross situation occurred (data i={i})')
+                    senkou_cross = (0, 0, 0)
+            else:
+                senkou_cross = (0, 0, 0)
 
             ### chikou span cross
 
@@ -234,12 +247,14 @@ class FeatureGenerator:
                     else:
                         chikou_cross = (0, 1, length)
                 else:
-                    print('weird 6:', self.data[i][self.feature_indices[self.datetime_feat_name]])
+                    logger.warning(f'weird chikou_cross situation occurred (data i={i})')
+                    chikou_cross = (0, 0, 0)
+            else:
+                chikou_cross = (0, 0, 0)
 
             ### kumo (cloud) breakout
 
-            cross_res = self._get_cross_and_length_regions('kumo_breakout', cloud_top, cloud_bottom,
-                                                           close, close, i)
+            cross_res = self._get_cross_and_length_regions('kumo_breakout', cloud_top, cloud_bottom, close, close, i)
             cross, length, first_line, second_line, third_line, fourth_line = cross_res
 
             # The Kumo Breakout signal occurs when the price leaves or crosses the Kumo (Cloud), which is why
@@ -354,25 +369,31 @@ class FeatureGenerator:
 
         ### check for start of overlap
 
-        top_region_top = top_region_bot = bot_region_top = bot_region_bot = None
         # region 1 is highest
         if self.data[i][r1_top] > self.data[i][r2_top]:
             top_region_top = r1_top
             top_region_bot = r1_bot
             bot_region_top = r2_top
-            bot_region_bot = r2_bot
         # region 2 is highest
         else:
             top_region_top = r2_top
             top_region_bot = r2_bot
             bot_region_top = r1_top
-            bot_region_bot = r1_bot
 
         # checking for start of overlap
         if cross_name not in self.cross_lengths:
-            # if the bottom line of the top region is still not defined then just consider no cross
+            # if the bottom line of the top region is still not defined at this point then that should mean a
+            # line of each region have equal values so just consider no cross, unless we are looking for
+            # a kumo (cloud) breakout
             if not old_top_region_bot:
-                return 0, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
+                if cross_name != 'kumo_breakout':
+                    return 0, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
+                else:
+                    if self.data[i][top_region_bot] > self.data[i][bot_region_top]:
+                        logger.warning(f'weird kumo_breakout detected (data i={i})')
+                        return 3, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
+                    logger.warning(f'weird kumo_breakout almost detected (data i={i})')
+                    return 0, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
             else:
                 # one region is beginning to intertwine or completely swallow the other, regardless this counts
                 # as the start of an overlap
@@ -380,15 +401,16 @@ class FeatureGenerator:
                         and self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
                     self.cross_lengths[cross_name] = (0, old_top_region_bot)
                     return 1, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
-                print('weird 11:', self.data[i][self.feature_indices[self.datetime_feat_name]])
+                logger.warning(f'weird region intertwine situation occurred (data i={i}, cross={cross_name})')
+                return 0, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
         else:
             # check for continuation of overlap
             if self.data[i][bot_region_top] <= self.data[i][top_region_top] \
                     and self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
-                self.cross_lengths[cross_name] = (
-                    self.cross_lengths[cross_name][0] + 1, self.cross_lengths[cross_name][1])
-                return 0, self.cross_lengths[cross_name][0], first_line[0], second_line[0], third_line[0], fourth_line[
-                    0]
+                self.cross_lengths[cross_name] = (self.cross_lengths[cross_name][0] + 1,
+                                                  self.cross_lengths[cross_name][1])
+                return 0, self.cross_lengths[cross_name][0], first_line[0],\
+                       second_line[0], third_line[0], fourth_line[0]
             # otherwise, 1 region must be completely above the other
             else:
                 original_top_region_bot = self.cross_lengths[cross_name][1]
@@ -438,7 +460,8 @@ class FeatureGenerator:
                 self.cross_lengths[cross_name] = (0, old_top_line_i,
                                                   self.data[index][self.feature_indices[self.datetime_feat_name]])
                 return 1, 0, top_line_i, bottom_line_i
-            print('weird 1:', self.data[index][self.feature_indices[self.datetime_feat_name]])
+            logger.warning(f'weird start of line overlap situation occurred (data i={index}, cross={cross_name})')
+            return 0, 0, top_line_i, bottom_line_i
         else:
 
             ## check for continuation of overlap
@@ -787,52 +810,57 @@ def add_ichimoku_features(df, inplace=False, negative_bears=True, include_most_r
 
             bull_strength, bear_strength, cross_length = ichimoku_features[cross_name]
 
-            if bull_strength > 0:
-                cross_dict['first_bull'] = True
-            if bear_strength > 0:
-                cross_dict['first_bear'] = True
+            bull_length = None
+            bear_length = None
+            if cross_length is not None:   # if cross_length is None bull_length and bear_length should be too
+                if bull_strength > bear_strength:
+                    bull_length = cross_length
+                    bear_length = 0
+                else:
+                    bull_length = 0
+                    bear_length = cross_length
+
+                if bull_strength > 0:
+                    cross_dict['first_bull'] = True
+                if bear_strength > 0:
+                    cross_dict['first_bear'] = True
+
+                if negative_bears:
+                    bear_strength *= -1
+
+            cross_dict['bull_strength'].append(bull_strength)
+            cross_dict['bull_length'].append(bull_length)
+
+            cross_dict['bear_strength'].append(bear_strength)
+            cross_dict['bear_length'].append(bear_length)
 
             if cross_dict['first_bull']:
-                if bull_strength > 0:
+                if bull_strength != 0:
                     cross_dict['most_recent_bull_strength'].append(bull_strength)
-                    cross_dict['bull_strength'].append(bull_strength)
                     cross_dict['ticks_since_bull'].append(0)
-                    cross_dict['most_recent_bull_length'].append(cross_length)
-                    cross_dict['bull_length'].append(cross_length)
+                    cross_dict['most_recent_bull_length'].append(bull_length)
                 else:
                     cross_dict['most_recent_bull_strength'].append(cross_dict['most_recent_bull_strength'][-1])
-                    cross_dict['bull_strength'].append(0)
                     cross_dict['ticks_since_bull'].append(cross_dict['ticks_since_bull'][-1] + 1)
                     cross_dict['most_recent_bull_length'].append(cross_dict['most_recent_bull_length'][-1])
-                    cross_dict['bull_length'].append(0)
             else:
                 cross_dict['most_recent_bull_strength'].append(None)
-                cross_dict['bull_strength'].append(None)
                 cross_dict['ticks_since_bull'].append(None)
                 cross_dict['most_recent_bull_length'].append(None)
-                cross_dict['bull_length'].append(None)
 
             if cross_dict['first_bear']:
-                if bear_strength > 0:
-                    if negative_bears:
-                        bear_strength *= -1
+                if bear_strength != 0:
                     cross_dict['most_recent_bear_strength'].append(bear_strength)
-                    cross_dict['bear_strength'].append(bear_strength)
                     cross_dict['ticks_since_bear'].append(0)
-                    cross_dict['most_recent_bear_length'].append(cross_length)
-                    cross_dict['bear_length'].append(cross_length)
+                    cross_dict['most_recent_bear_length'].append(bear_length)
                 else:
                     cross_dict['most_recent_bear_strength'].append(cross_dict['most_recent_bear_strength'][-1])
-                    cross_dict['bear_strength'].append(0)
                     cross_dict['ticks_since_bear'].append(cross_dict['ticks_since_bear'][-1] + 1)
                     cross_dict['most_recent_bear_length'].append(cross_dict['most_recent_bear_length'][-1])
-                    cross_dict['bear_length'].append(0)
             else:
                 cross_dict['most_recent_bear_strength'].append(None)
-                cross_dict['bear_strength'].append(None)
                 cross_dict['ticks_since_bear'].append(None)
                 cross_dict['most_recent_bear_length'].append(None)
-                cross_dict['bear_length'].append(None)
 
     if not inplace:
         df = df.copy()
