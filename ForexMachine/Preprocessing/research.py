@@ -16,16 +16,45 @@ from sklearn.preprocessing import OneHotEncoder
 TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2011-01-01', '2020-10-01'
 
 
-class FeatuteGenerator:
-    def __init__(self, data, feature_indices):
+class FeatureGenerator:
+    def __init__(self, data, feature_indices, live_trading=False, alternate_feature_names=None):
         self.data = data
         self.feature_indices = feature_indices
         self.cross_lengths = {}
         self.temporal_features = namedtuple('temporal_features', 'quarter year month day day_of_week hour minute')
-        self.safe_start_idx = self._end_of_missing_data_idx(['chikou_span_visual'])
+        self.live_trading = live_trading
+        self.safe_start_idx = None
+
+        default_feature_names = {
+            'datetime': 'datetime',
+            'Close': 'Close',
+            'trend_visual_ichimoku_a': 'trend_visual_ichimoku_a',
+            'trend_visual_ichimoku_b': 'trend_visual_ichimoku_b',
+            'trend_ichimoku_a': 'trend_ichimoku_a',
+            'trend_ichimoku_b': 'trend_ichimoku_b',
+            'trend_ichimoku_conv': 'trend_ichimoku_conv',
+            'trend_ichimoku_base': 'trend_ichimoku_base',
+            'chikou_span': 'chikou_span',
+            'chikou_span_visual': 'chikou_span_visual'
+        }
+        if alternate_feature_names is not None:
+            default_feature_names.update(alternate_feature_names)
+        self.datetime_feat_name = default_feature_names['datetime']
+        self.close_feat_name = default_feature_names['Close']
+        self.senkou_a_visual_col_name = default_feature_names['trend_visual_ichimoku_a']
+        self.senkou_b_visual_col_name = default_feature_names['trend_visual_ichimoku_b']
+        self.senkou_a_col_name = default_feature_names['trend_ichimoku_a']
+        self.senkou_b_col_name = default_feature_names['trend_ichimoku_b']
+        self.tenken_conv_col_name = default_feature_names['trend_ichimoku_conv']
+        self.kijun_base_col_name = default_feature_names['trend_ichimoku_base']
+        self.chikou_span_col_name = default_feature_names['chikou_span']
+        self.chikou_span_visual_col_name = default_feature_names['chikou_span_visual']
+
+        if not live_trading:
+            self.safe_start_idx = self._end_of_missing_data_idx(exluded_features=[self.chikou_span_visual_col_name])
 
     def get_temporal_features(self, i):
-        dt = self.data[i][self.feature_indices['datetime']]
+        dt = self.data[i][self.feature_indices[self.datetime_feat_name]]
 
         features = self.temporal_features(quarter=dt.quarter, year=dt.year, month=dt.month, day=dt.day,
                                           day_of_week=dt.dayofweek, hour=dt.hour, minute=dt.minute)
@@ -48,18 +77,21 @@ class FeatuteGenerator:
         cloud_breakout_bull = False
         cloud_breakout_bear = False
 
-        close = self.feature_indices['Close']
-        trend_visual_ichimoku_a = self.feature_indices['trend_visual_ichimoku_a']
-        trend_visual_ichimoku_b = self.feature_indices['trend_visual_ichimoku_b']
-        trend_ichimoku_a = self.feature_indices['trend_ichimoku_a']
-        trend_ichimoku_b = self.feature_indices['trend_ichimoku_b']
-        trend_ichimoku_conv = self.feature_indices['trend_ichimoku_conv']
-        trend_ichimoku_base = self.feature_indices['trend_ichimoku_base']
-        chikou_span = self.feature_indices['chikou_span']
+        close = self.feature_indices[self.close_feat_name]
+        trend_visual_ichimoku_a = self.feature_indices[self.senkou_a_visual_col_name]
+        trend_visual_ichimoku_b = self.feature_indices[self.senkou_b_visual_col_name]
+        trend_ichimoku_a = self.feature_indices[self.senkou_a_col_name]
+        trend_ichimoku_b = self.feature_indices[self.senkou_b_col_name]
+        trend_ichimoku_conv = self.feature_indices[self.tenken_conv_col_name]
+        trend_ichimoku_base = self.feature_indices[self.kijun_base_col_name]
+        chikou_span = self.feature_indices[self.chikou_span_col_name]
 
-        cloud_top, cloud_bottom = self._get_top_and_bottom_line_idx(trend_visual_ichimoku_a, trend_visual_ichimoku_b, i)
+        ### check for crosses
 
-        if not pd.isna(self.data[i][trend_ichimoku_conv]) and not pd.isna(self.data[i][trend_ichimoku_base]):
+        if self.live_trading or i >= self.safe_start_idx:
+            cloud_top, cloud_bottom = self._get_top_and_bottom_line_idx(trend_visual_ichimoku_a,
+                                                                        trend_visual_ichimoku_b, i)
+
             if self.data[i][close] > self.data[i][trend_ichimoku_conv] \
                     and self.data[i][close] > self.data[i][trend_ichimoku_base]:
                 is_price_above_cb_lines = True
@@ -78,10 +110,6 @@ class FeatuteGenerator:
                 else:
                     is_price_above_cloud = True
                     is_price_below_cloud = False
-
-        ### check for crosses
-
-        if i >= self.safe_start_idx:
 
             ### tk cross
 
@@ -112,7 +140,7 @@ class FeatuteGenerator:
                     else:
                         tk_cross = (0, 1, length)
                 else:
-                    print('weird 5:', self.data[i][self.feature_indices['datetime']])
+                    print('weird 5:', self.data[i][self.feature_indices[self.datetime_feat_name]])
 
             ### tk price cross
 
@@ -138,10 +166,10 @@ class FeatuteGenerator:
                     elif self.data[i][close] <= self.data[i][cloud_bottom]:
                         tk_price_cross = (0, 3, length)
             elif cross == 3 and length > cross_length_limit:
-                print(
-                    f'cross type = {cross}, cross length = {length}, {self.data[i][self.feature_indices["datetime"]]}')
+                print(f'cross type = {cross}, cross length = {length}, '
+                      f'{self.data[i][self.feature_indices[self.datetime_feat_name]]}')
 
-            ### cloud (senkou) cross
+            ### senkou (cloud) cross
 
             # As the Senkou Spans are projected forward, the cross that triggers this signal will be 26 days ahead of the
             # price and, hence, the actual date that the signal occurs.  The strength of the signal is determined by the
@@ -171,7 +199,7 @@ class FeatuteGenerator:
                     else:
                         senkou_cross = (0, 1, length)
                 else:
-                    print('weird 55:', self.data[i][self.feature_indices['datetime']])
+                    print('weird 55:', self.data[i][self.feature_indices[self.datetime_feat_name]])
 
             ### chikou span cross
 
@@ -206,7 +234,7 @@ class FeatuteGenerator:
                     else:
                         chikou_cross = (0, 1, length)
                 else:
-                    print('weird 6:', self.data[i][self.feature_indices['datetime']])
+                    print('weird 6:', self.data[i][self.feature_indices[self.datetime_feat_name]])
 
             ### kumo (cloud) breakout
 
@@ -230,8 +258,6 @@ class FeatuteGenerator:
             'is_price_above_cloud': is_price_above_cloud,
             'is_price_inside_cloud': is_price_inside_cloud,
             'is_price_below_cloud': is_price_below_cloud,
-            'cloud_top': cloud_top,
-            'cloud_bottom': cloud_bottom,
             'tk_cross': tk_cross,
             'tk_price_cross': tk_price_cross,
             'senkou_cross': senkou_cross,
@@ -254,7 +280,7 @@ class FeatuteGenerator:
                     continue
 
                 feature_i = self.feature_indices[feature]
-                if isinstance(self.data[i][feature_i], float) and np.isnan(self.data[i][feature_i]):
+                if pd.isnull(self.data[i][feature_i]):
                     safe_idx = None
                     nan_in_row = True
                     break
@@ -354,7 +380,7 @@ class FeatuteGenerator:
                         and self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
                     self.cross_lengths[cross_name] = (0, old_top_region_bot)
                     return 1, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
-                print('weird 11:', self.data[i][self.feature_indices['datetime']])
+                print('weird 11:', self.data[i][self.feature_indices[self.datetime_feat_name]])
         else:
             # check for continuation of overlap
             if self.data[i][bot_region_top] <= self.data[i][top_region_top] \
@@ -409,9 +435,10 @@ class FeatuteGenerator:
 
         if cross_name not in self.cross_lengths:
             if self.data[index][line_index1] == self.data[index][line_index2]:
-                self.cross_lengths[cross_name] = (0, old_top_line_i, self.data[index][self.feature_indices['datetime']])
+                self.cross_lengths[cross_name] = (0, old_top_line_i,
+                                                  self.data[index][self.feature_indices[self.datetime_feat_name]])
                 return 1, 0, top_line_i, bottom_line_i
-            print('weird 1:', self.data[index][self.feature_indices['datetime']])
+            print('weird 1:', self.data[index][self.feature_indices[self.datetime_feat_name]])
         else:
 
             ## check for continuation of overlap
@@ -710,7 +737,7 @@ def add_ichimoku_features(df, inplace=False, negative_bears=True, include_most_r
     data = df.to_numpy()
     feature_indices = {df.columns[i]: i for i in range(len(df.columns))}
 
-    fg = FeatuteGenerator(data, feature_indices)
+    fg = FeatureGenerator(data, feature_indices)
     for i in range(len(data)):
         # get temporal features signals
         temporal_features = fg.get_temporal_features(i)
@@ -911,15 +938,16 @@ def dummy_and_remove_features(data_df, categories_dict={}, cols_to_remove=[], in
     if include_defaults:
         cd = {
             'quarter': [1, 2, 3, 4],
-            'day_of_week': [0, 1, 2, 3, 4]
+            'day_of_week': [0, 1, 2, 3, 4, 6]
         }
 
+        # for some reason mt5 terminal rarely returns bar data from sundays so just remove that feature (day_of_week_6)
         cols = {'spread', 'momentum_rsi', 'month', 'day', 'minute', 'hour', 'year', 'chikou_span_visual', 'chikou_span',
                 'tk_cross_bull_length', 'tk_cross_bear_length',
                 'tk_price_cross_bull_length', 'tk_price_cross_bear_length',
                 'senkou_cross_bull_length', 'senkou_cross_bear_length',
                 'chikou_cross_bull_length', 'chikou_cross_bear_length',
-                'trend_visual_ichimoku_a', 'trend_visual_ichimoku_b', }
+                'trend_visual_ichimoku_a', 'trend_visual_ichimoku_b', 'day_of_week_6'}
         # 'trend_ichimoku_base','trend_ichimoku_conv', 'trend_ichimoku_a', 'trend_ichimoku_b'}
 
         if not keep_datetime:
@@ -928,10 +956,10 @@ def dummy_and_remove_features(data_df, categories_dict={}, cols_to_remove=[], in
         cd.update(categories_dict)
         categories_dict = cd
         cols_to_remove = set(cols_to_remove) | cols  # prios keys/vals from 2nd arg of | (or) operand
-        data_df_cols_set = set(data_df.columns)
+        cols_to_remove = list(cols_to_remove)
 
-        categories_dict = {key: categories_dict[key] for key in categories_dict if key in data_df_cols_set}
-        cols_to_remove = [col for col in cols_to_remove if col in data_df_cols_set]
+    data_df_cols_set = set(data_df.columns)
+    categories_dict = {key: categories_dict[key] for key in categories_dict if key in data_df_cols_set}
 
     if len(categories_dict) > 0:
         catagorical_cols = list(categories_dict.keys())
@@ -949,6 +977,8 @@ def dummy_and_remove_features(data_df, categories_dict={}, cols_to_remove=[], in
 
         cols_to_remove.extend(catagorical_cols)
 
+    data_df_cols_set = set(data_df.columns)
+    cols_to_remove = [col for col in cols_to_remove if col in data_df_cols_set]
     data_df = data_df.drop(cols_to_remove, axis=1)
 
     return data_df
@@ -1003,7 +1033,8 @@ def error_rate(y_true_df, y_pred_df):
 
 
 def no_missing_data_idx_range(df, early_ending_cols=[]):
-    early_ending_cols = [df.columns.get_loc(col_name) for col_name in early_ending_cols]
+    columns_set = set(df.columns)
+    early_ending_cols = [df.columns.get_loc(col_name) for col_name in early_ending_cols if col_name in columns_set]
     early_ending_cols = set(early_ending_cols)
     data = df.to_numpy()
     start_idx = None
@@ -1485,3 +1516,266 @@ def get_split_lstm_data(preprocessed_data_df, ma_window, seq_len, split_percents
             'all_train_normalization_terms': all_train_normalization_terms
         }
     return data_dict
+
+
+def generate_ichimoku_labels(df, min_profit_percent=0.003, profit_noise_percent=0.003, label_non_signals=False,
+                             print_debug=True, signals_to_consider=None, contract_size=100_000, lots_per_trade=1,
+                             in_quote_currency=True, pip_resolution=0.0001):
+    # when min_profit==profit_noise this turns into a binary classification problem (buy or sell, no wait)
+    no_waits = False
+    if profit_noise_percent == min_profit_percent:
+        no_waits = True
+
+    pip_value = contract_size * lots_per_trade * pip_resolution  # in quote currency (right side currency of currency pair)
+    min_profit = min_profit_percent * lots_per_trade * contract_size  # in base currency (left side currency of currency pair)
+    profit_noise = profit_noise_percent * lots_per_trade * contract_size  # in base currency (left side currency of currency pair)
+
+    data = df.to_numpy()
+    feature_indices = {df.columns[i]: i for i in range(len(df.columns))}
+    close_trade_features = []
+    close_trade_labels = []
+
+    # if any of these columns are equal to 0 then the corresponding signal has occured at that tick
+    if not signals_to_consider:
+        signals_to_consider = ['cloud_breakout_bull', 'cloud_breakout_bear',  # cloud breakout
+                               'tk_cross_bull_strength', 'tk_cross_bear_strength',  # Tenkan Sen / Kijun Sen Cross
+                               'tk_price_cross_bull_strength', 'tk_price_cross_bear_strength',
+                               # price crossing both the Tenkan Sen / Kijun Sen
+                               'senkou_cross_bull_strength', 'senkou_cross_bear_strength',  # Senkou Span Cross
+                               'chikou_cross_bull_strength', 'chikou_cross_bear_strength']  # Chikou Span Cross
+
+    # find index at which data becomes consistant (no missing data)
+    early_ending_cols = []
+    if 'chikou_span_visual' in df.columns:
+        early_ending_cols = ['chikou_span_visual']
+    start_idx, end_idx = no_missing_data_idx_range(df, early_ending_cols=early_ending_cols)
+
+    has_datetimes = True if 'datetime' in df.columns else False
+
+    def get_decision_label(trade, first, current_close_price, decisions_so_far, leftover=False):
+        decision = 'first' if first else 'second'
+        label = None
+        if trade[f'{decision}_decision_best_buy_profit'][0] > trade[f'{decision}_decision_best_sell_profit'][0]:
+            # add 1 to ticks_till_peak to reserve 0 ticks for 'wait' labels
+            ticks_till_peak = trade[f'{decision}_decision_best_buy_profit'][1] - trade['trade_open_tick_i'] + 1
+            label = ['buy', ticks_till_peak, trade[f'{decision}_decision_best_buy_profit'][0],
+                     trade[f'{decision}_decision_best_buy_profit'][1]]
+        elif trade[f'{decision}_decision_best_buy_profit'][0] < trade[f'{decision}_decision_best_sell_profit'][0]:
+            ticks_till_peak = trade[f'{decision}_decision_best_sell_profit'][1] - trade['trade_open_tick_i'] + 1
+            label = ['sell', ticks_till_peak, trade[f'{decision}_decision_best_sell_profit'][0],
+                     trade[f'{decision}_decision_best_sell_profit'][1]]
+
+        scaled_min_profit = min_profit if not in_quote_currency else min_profit / current_close_price
+        if label and label[2] < scaled_min_profit and not no_waits and not leftover:
+            label = ['wait', 0, 0, None]
+
+        if trade[f'{decision}_decision_best_buy_profit'][0] == trade[f'{decision}_decision_best_sell_profit'][0]:
+            if print_debug:
+                print(f'{decision} decision best buy and sell profit equal, trade: {trade}\n')
+
+            if not no_waits:
+                label = ['wait', 0, 0, None]
+            else:
+                decisions_so_far = decisions_so_far[-11:]
+                num_buys = decisions_so_far.count('buy')
+                num_sells = len(decisions_so_far) - num_buys
+                if num_buys > num_sells:
+                    ticks_till_peak = trade[f'{decision}_decision_best_buy_profit'][1] - trade['trade_open_tick_i'] + 1
+                    label = ['buy', ticks_till_peak, trade[f'{decision}_decision_best_buy_profit'][0],
+                             trade[f'{decision}_decision_best_buy_profit'][1]]
+                else:
+                    ticks_till_peak = trade[f'{decision}_decision_best_sell_profit'][1] - trade['trade_open_tick_i'] + 1
+                    label = ['sell', ticks_till_peak, trade[f'{decision}_decision_best_sell_profit'][0],
+                             trade[f'{decision}_decision_best_sell_profit'][1]]
+
+        return label
+
+    # now simulate hedged trades to determine labels
+    labels_dict = {}  # 6 labels per label: (1) decision (buy, sell, wait) (str), (2) ticks till best profit (int), and (3) the profit (float) x2 for each decision
+    trades = {}
+    pending_order = None
+    pending_close = None
+    decisions_so_far = []
+    for i, row in enumerate(data[start_idx:]):
+        i += start_idx
+
+        if pending_order is not None:
+            pending_order_i, causes = pending_order
+            open_price = data[i][feature_indices['Open']]
+            signal_datetime = None if not has_datetimes else data[pending_order_i][feature_indices['datetime']]
+            trades[pending_order_i] = {
+                'signal_datetime': signal_datetime,
+                'open_price': open_price,
+                'trade_open_tick_i': i,
+                'causes': causes,
+                'consider_profit': False,
+                'first_decision_best_buy_profit': None,
+                # should be tuple of size 2 where 1st elem is the profit and 2nd is the number of bars to get to that profit
+                'first_decision_best_sell_profit': None,
+                'second_decision_best_buy_profit': None,
+                'second_decision_best_sell_profit': None,
+                'first_decision_done': False,
+                'second_decision_done': False,
+                'first_decision_done_tick_dt': None,
+                'second_decision_done_tick_dt': None,
+                'first_decision_done_tick_i': None,
+                'second_decision_done_tick_i': None
+            }
+            pending_order = None
+
+        closed_trades = []
+        for trade_i in trades:
+            trade = trades[trade_i]
+            trade_open_price = trade['open_price']
+            close_price = row[feature_indices['Close']]
+            last_close_price = data[i - 1][feature_indices['Close']] if i - 1 != trade_i else trade_open_price
+            buy_profit = get_profit(close_price, trade_open_price, pip_value, pip_resolution, in_quote_currency)
+            sell_profit = buy_profit * -1
+
+            scaled_profit_noise = profit_noise if not in_quote_currency else profit_noise / close_price
+            if abs(buy_profit) >= scaled_profit_noise:
+                trade['consider_profit'] = True
+
+            if not trade['first_decision_done']:
+                if not trade['first_decision_best_buy_profit'] or trade['first_decision_best_buy_profit'][
+                    0] < buy_profit:
+                    trade['first_decision_best_buy_profit'] = (buy_profit, i,
+                                                               f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+
+                if not trade['first_decision_best_sell_profit'] or trade['first_decision_best_sell_profit'][
+                    0] < sell_profit:
+                    trade['first_decision_best_sell_profit'] = (sell_profit, i,
+                                                                f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+
+                # test for end of 1st decision: see if current close price crossed the intial price at which the trade was opened at
+                # note: only look for crosses after profit has exceeded profit_noise (small amounts of profit w/ respect to lots_per_trade and in_quote_currency)
+                if trade['consider_profit'] and \
+                        ((last_close_price < trade_open_price and close_price >= trade_open_price) \
+                         or (last_close_price > trade_open_price and close_price <= trade_open_price)):
+                    label = get_decision_label(trade, current_close_price=close_price, first=True,
+                                               decisions_so_far=decisions_so_far)
+                    trade['first_decision_done'] = True
+                    first_decision_done_tick_dt = None if not has_datetimes else data[i][feature_indices['datetime']]
+                    trade['first_decision_done_tick_dt'] = first_decision_done_tick_dt
+                    trade['first_decision_done_tick_i'] = i
+                    labels_dict[trade_i] = {'first_decision': label}
+                    decisions_so_far.append(label[0])
+
+                    trade['consider_profit'] = False
+
+                    # at this point trade['second_decision_best_buy_profit'] should be None
+                    trade['second_decision_best_buy_profit'] = (buy_profit, i,
+                                                                f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+                    trade['second_decision_best_sell_profit'] = (sell_profit, i,
+                                                                 f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+
+            elif not trade['second_decision_done']:
+                if trade['second_decision_best_buy_profit'][0] < buy_profit:
+                    trade['second_decision_best_buy_profit'] = (buy_profit, i,
+                                                                f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+
+                if trade['second_decision_best_sell_profit'][0] < sell_profit:
+                    trade['second_decision_best_sell_profit'] = (sell_profit, i,
+                                                                 f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+
+                # test for end of 2nd decision: see if current close price crossed the intial price at which the trade was opened at again
+                # note: only look for crosses after profit has exceeded profit_noise (small amounts of profit w/ respect to lots_per_trade and in_quote_currency)
+                if trade['consider_profit'] and \
+                        ((last_close_price < trade_open_price and close_price >= trade_open_price) \
+                         or (last_close_price > trade_open_price and close_price <= trade_open_price)):
+                    label = get_decision_label(trade, current_close_price=close_price, first=False,
+                                               decisions_so_far=decisions_so_far)
+                    trade['second_decision_done'] = True
+                    second_decision_done_tick_dt = None if not has_datetimes else data[i][feature_indices['datetime']]
+                    trade['second_decision_done_tick_dt'] = second_decision_done_tick_dt
+                    trade['second_decision_done_tick_i'] = i
+                    labels_dict[trade_i]['second_decision'] = label
+                    decisions_so_far.append(label[0])
+
+                    labels_dict[trade_i]['causes'] = ','.join(trade['causes'])
+                    closed_trades.append(trade_i)
+
+        pending_close = None
+
+        for trade_i in closed_trades:
+            del trades[trade_i]
+
+        causes = []
+        for sig in signals_to_consider:
+            sig_i = feature_indices[sig]
+            if int(row[sig_i]) != 0:
+                causes.append(sig)
+
+        if len(causes) > 0:
+            pending_order = (i, causes)
+            pending_close = (i, causes)
+
+    # leftover open trades
+    for trade_i in trades:
+        trade = trades[trade_i]
+
+        if not trade['first_decision_done']:
+            label = get_decision_label(trade, current_close_price=data[-1][feature_indices['Close']], first=True,
+                                       leftover=True, decisions_so_far=decisions_so_far)
+            labels_dict[trade_i] = {'first_decision': label}
+
+        elif not trade['second_decision_done']:
+            label = get_decision_label(trade, current_close_price=data[-1][feature_indices['Close']], first=False,
+                                       leftover=True, decisions_so_far=decisions_so_far)
+            labels_dict[trade_i]['second_decision'] = label
+
+        labels_dict[trade_i]['causes'] = ','.join(trade['causes'])
+
+    first_decision_labels_count = 4
+    second_decision_labels_count = 4
+    for i in labels_dict:
+        entry = labels_dict[i]
+        if 'first_decision' in entry:
+            if not first_decision_labels_count:
+                first_decision_labels_count = len(entry['first_decision'])
+            elif first_decision_labels_count != len(entry['first_decision']):
+                print(f'number of 1st decision labels are not equal for each row (row {i}: {entry["first_decision"]}, '
+                      f'changed from {first_decision_labels_count} to {len(entry["first_decision"])},)!')
+                return None
+        if 'second_decision' in entry:
+            if not second_decision_labels_count:
+                second_decision_labels_count = len(entry['second_decision'])
+            elif second_decision_labels_count != len(entry['second_decision']):
+                print(f'number of 2nd decision labels are not equal for each row (row {i}: {entry["second_decision"]}, '
+                      f'changed from {second_decision_labels_count} to {len(entry["second_decision"])})!')
+                return None
+
+    labels = []
+    for i in range(len(data)):
+        if i in labels_dict:
+            entry = labels_dict[i]
+            causes_label = entry['causes']
+
+            first_decision_labels = [None] * first_decision_labels_count
+            second_decision_labels = [None] * second_decision_labels_count
+            if 'first_decision' in entry:
+                first_decision_labels = entry['first_decision']
+            if 'second_decision' in entry:
+                second_decision_labels = entry['second_decision']
+
+            label = [*first_decision_labels, *second_decision_labels, causes_label]
+
+            labels.append(label)
+
+        # just assign 'wait' labels to rows of data where no ichimoku signlas occured if label_non_signals==True
+        elif label_non_signals:
+            labels.append(['wait', 0, 0, None, 'wait', 0, 0, None, None])
+
+        # otherwise just put None labels
+        else:
+            labels.append(
+                [None] * (first_decision_labels_count + second_decision_labels_count + 1))  # +1 for causes label
+
+    label_names = ['first_decision', 'ticks_till_best_profit_first_decision', 'best_profit_first_decision',
+                   'profit_peak_first_decision',
+                   'second_decision', 'ticks_till_best_profit_second_decision', 'best_profit_second_decision',
+                   'profit_peak_second_decision',
+                   'causes']
+
+    labels_df = pd.DataFrame(labels, columns=label_names)
+    return labels_df

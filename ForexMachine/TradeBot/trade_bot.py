@@ -120,6 +120,9 @@ class TradeStrategy:
                   f'\n{self.mt5_terminal_info}\n{self.mt5_account_info}\n')
 
         self.utc_offset = self.get_server_utc_offset()
+        if self.utc_offset is None:
+            return False
+
         return True
 
     def get_server_utc_offset(self):
@@ -153,7 +156,7 @@ class TradeStrategy:
         first_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, self.bar_buffer_size + 1)
         if first_bars is None:
             logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
-            return
+            return False
 
         self.last_completed_bar_timestamp = first_bars[-2][0]
         self.init_bars_buffer(first_bars[1:])
@@ -169,14 +172,14 @@ class TradeStrategy:
             latest_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, 2)
             if latest_bars is None:
                 logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
-                return
+                return False
 
             while latest_bars[-2][0] == self.last_completed_bar_timestamp:
                 self.exit_event.wait(0.5)
                 latest_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, 2)
                 if latest_bars is None:
                     logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
-                    return
+                    return False
 
             self.process_latest_completed_bar(latest_bars[-2])
 
@@ -185,7 +188,11 @@ class TradeStrategy:
                 self.exit_event.wait(next_update_delta)
 
             self.last_completed_bar_timestamp = latest_bars[-2][0]
-        return 0
+        return True
+
+    def finish_up(self):
+        mt5.shutdown()
+        return True
 
     def init_bars_buffer(self, first_bars):
         pass
@@ -316,19 +323,26 @@ class IchiCloudStrategy(TradeStrategy):
 
 def run_trade_strategy(strategy, strategy_kwargs, strat_name, proc_conn, mt5_login_info, exit_event):
     strategy = strategy(**strategy_kwargs)
+
     if not strategy.setup_trade_strategy(strat_name, proc_conn, mt5_login_info, exit_event):
-        return
-    strategy.run()
+        return False
+
+    if not strategy.run():
+        return False
+
+    return True
 
 
 if __name__ == '__main__':
     # mt5.initialize()
     #
-    # rates = mt5.copy_rates_from_pos('EURUSD', 16385, 0, 2)
-    # print(mt5.terminal_info())
-    # print(mt5.account_info())
+    # rates = mt5.copy_rates_from_pos('EURUSD', 16385, 0, 200)
+    # print(rates)
+    # print(type(rates))
+    # print(type(rates[0]))
+    # print(type(rates[0][0]))
     # mt5.shutdown()
-    #
+
     # print()
     # for bar in rates:
     #     print(datetime.utcnow().isoformat())

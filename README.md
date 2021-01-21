@@ -1,2 +1,2 @@
 # ForexMachine
-money bot hopefully 🤞
+LLC twitter sponsor
