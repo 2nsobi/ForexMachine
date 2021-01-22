@@ -5,10 +5,13 @@ import getpass
 import time
 from ForexMachine import util
 from collections import deque
-from ForexMachine.Preprocessing import research
+from ForexMachine.Preprocessing import research, live_trading
 from typing import Optional
 import pickle
 import tensorflow as tf
+import pandas as pd
+import xgboost as xgb
+import numpy as np
 
 logger = util.Logger.get_instance()
 
@@ -50,7 +53,7 @@ class TradeBot:
                 self.mt5_login_info['login_id'] = login_id
                 break
             except ValueError:
-                logger.error('Invalid login ID, ID must be interpretable as an integer')
+                print('Invalid login ID, ID must be interpretable as an integer')
         self.mt5_login_info['password'] = getpass.getpass(prompt='Please enter password: ')
 
     def run_strategy(self, strategy, strategy_kwargs={}, name_suffix=None):
@@ -97,10 +100,17 @@ class TradeStrategy:
         self.mt5_timeframe = None
         self.data = deque()
         self.update_delta = None  # in secs
-        self.bar_buffer_size = 200  # pre-load 200 bars of price data for
+        self.bar_buffer_size = 200  # size of bar q
         self.utc_offset = None
         self.exit_event = None
         self.last_completed_bar_timestamp = None
+        self.lfg = None
+        self.max_concurrent_trades = np.inf
+        self.indicators = []
+        self.features = []
+        self.custom_settings = {}
+        self.trades = {}
+        self.process_immediately = False
 
     def setup_trade_strategy(self, strat_name, proc_conn, mt5_login_info, exit_event):
         self.name = strat_name
@@ -158,16 +168,31 @@ class TradeStrategy:
             logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
             return False
 
-        self.last_completed_bar_timestamp = first_bars[-2][0]
-        self.init_bars_buffer(first_bars[1:])
+        self.lfg = live_trading.LiveFeatureGenerator(indicators=self.indicators, features=self.features,
+                                                     utc_offset=self.utc_offset, custom_settings=self.custom_settings)
+
+        first_completed_bars = first_bars[1:]
+        if not self.lfg.process_first_bars(first_completed_bars):
+            logger.error(f'Live feature generator unable to process first bars')
+            return False
+        self.process_first_bars(self.lfg.data_q, self.lfg.all_features_filled_idx)
+
+        if self.process_immediately:
+            print(f'Immediate start: {self.name} strategy starting to process {self.symbol} '
+                  f'{self.timeframe} price bars')
+            self.process_new_data(self.lfg.data_q, self.lfg.feature_indices)
 
         next_update_delta = self.get_next_update_delta(first_bars[-1][0])
         if next_update_delta > 0:
-            print(f'{self.name} strategy will begin attempting to trade in {next_update_delta} seconds')
+            if not self.process_immediately:
+                print(f'{self.name} strategy will begin processing {self.symbol} {self.timeframe} price bars in '
+                      f'{next_update_delta} seconds')
             self.exit_event.wait(next_update_delta)
         else:
-            print(f'{self.name} strategy has begun attempting to trade')
+            if not self.process_immediately:
+                print(f'{self.name} strategy has begun processing {self.symbol} {self.timeframe} price bars')
 
+        self.last_completed_bar_timestamp = first_bars[-2][0]
         while not self.exit_event.is_set():
             latest_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, 2)
             if latest_bars is None:
@@ -181,7 +206,10 @@ class TradeStrategy:
                     logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
                     return False
 
-            self.process_new_bar(latest_bars[-2])
+            if not self.lfg.process_new_bar(latest_bars[-2]):
+                logger.error(f'Live feature generator unable to process new bar:\n{latest_bars[-2]}')
+                return False
+            self.process_new_data(self.lfg.data_q, self.lfg.feature_indices)
 
             next_update_delta = self.get_next_update_delta(latest_bars[-1][0])
             if next_update_delta > 0:
@@ -190,14 +218,23 @@ class TradeStrategy:
             self.last_completed_bar_timestamp = latest_bars[-2][0]
         return True
 
+    def get_reordered_feature_row(self, row, features):
+        row = [row[self.lfg.feature_indices[feat_name]] for feat_name in features]
+        return row
+
+    def open_trade(self):
+        if len(self.trades) < self.max_concurrent_trades:
+            print('opening trade')
+        return True
+
     def finish_up(self):
         mt5.shutdown()
         return True
 
-    def init_bars_buffer(self, first_bars):
+    def process_first_bars(self, first_bars_q, all_features_filled_idx):
         pass
 
-    def process_new_bar(self, new_bar):
+    def process_new_data(self, data_q, feature_indices):
         pass
 
 
@@ -208,7 +245,8 @@ class IchiCloudStrategy(TradeStrategy):
                  ichi_settings=(9, 30, 60), profit_noise_percent=0.0016, fast_ma_model_path=None, xgb_model_path=None,
                  fast_ma_diff_thresh=0.01, decision_prob_diff_thresh=0.5, bar_buffer_size=200, model_files_path=None,
                  train_data_start_iso=research.TRAIN_DATA_START_ISO, train_data_end_iso=research.TRAIN_DATA_END_ISO,
-                 ma_cols=None, pc_cols=None, normalization_groups=None, open_trade_sigs=None):
+                 ma_cols=None, pc_cols=None, normalization_groups=None, open_trade_sigs=None, models_features_names=None,
+                 max_concurrent_trades=np.inf, process_immediately=False):
         self.symbol = symbol.upper()
         self.timeframe = timeframe.upper()
         self.lots_per_trade = lots_per_trade
@@ -222,22 +260,38 @@ class IchiCloudStrategy(TradeStrategy):
         self.lstm_seq_len = lstm_seq_len
         self.xgb_model_path = xgb_model_path
         self.model_files_path = model_files_path
-        self.ma_cols = ma_cols
-        self.pc_cols = pc_cols
         self.normalization_groups = normalization_groups
         self.open_trade_sigs = open_trade_sigs
+        self.ma_cols = ma_cols
+        self.pc_cols = pc_cols
+        self.models_features_names = models_features_names
+        self.max_concurrent_trades = max_concurrent_trades
+        self.process_immediately = process_immediately
+        self.ma_cols_idx_set = None
+        self.pc_cols_idx_set = None
         self.xgb_labels_dict = {1: 'buy', 0: 'sell'}
+        self.indicators = ['ichimoku']
+        self.features = ['ichimoku_signals']
+        self.xgb_model_perc_chngs_q = deque()
+        self.custom_settings = {
+            'ichimoku': {
+                'tenkan_period': self.tenkan_period,
+                'kijun_period': self.kijun_period,
+                'chikou_period': self.kijun_period,
+                'senkou_b_period': self.senkou_b_period
+            }
+        }
 
         if self.ma_cols is None:
             self.ma_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         if self.pc_cols is None:
             self.pc_cols = ['Open', 'High', 'Low', 'Close', 'Volume',
-                            'trend_ichimoku_base', 'trend_ichimoku_conv',
-                            'trend_ichimoku_a', 'trend_ichimoku_b']
+                            'kijun_base', 'tenken_conv', 'senkou_a', 'senkou_b']
+
         if self.normalization_groups is None:
             self.normalization_groups = [['Open', 'High', 'Low', 'Close'],
-                                         ['trend_ichimoku_base', 'trend_ichimoku_conv'],
-                                         ['trend_ichimoku_a', 'trend_ichimoku_b'],
+                                         ['kijun_base', 'tenken_conv'],
+                                         ['senkou_a', 'senkou_b'],
                                          ['tk_cross_bull_strength', 'tk_cross_bear_strength',
                                           'tk_price_cross_bull_strength', 'tk_price_cross_bear_strength',
                                           'senkou_cross_bull_strength', 'senkou_cross_bear_strength',
@@ -248,6 +302,17 @@ class IchiCloudStrategy(TradeStrategy):
                                     'tk_price_cross_bull_strength', 'tk_price_cross_bear_strength',
                                     'senkou_cross_bull_strength', 'senkou_cross_bear_strength',
                                     'chikou_cross_bull_strength', 'chikou_cross_bear_strength']
+
+        if self.models_features_names is None:
+            self.models_features_names = ['Open', 'High', 'Low', 'Close', 'Volume', 'tenken_conv', 'kijun_base',
+                                           'senkou_a', 'senkou_b', 'is_price_above_cb_lines',
+                                           'is_price_above_cloud', 'is_price_inside_cloud', 'is_price_below_cloud',
+                                           'cloud_breakout_bull', 'cloud_breakout_bear', 'tk_cross_bull_strength',
+                                           'tk_cross_bear_strength', 'tk_price_cross_bull_strength',
+                                           'tk_price_cross_bear_strength', 'senkou_cross_bull_strength',
+                                           'senkou_cross_bear_strength', 'chikou_cross_bull_strength',
+                                           'chikou_cross_bear_strength', 'quarter_2', 'quarter_3', 'quarter_4',
+                                           'day_of_week_1', 'day_of_week_2', 'day_of_week_3', 'day_of_week_4']
 
         if self.model_files_path is None:
             self.model_files_path = util.get_model_files_dir()
@@ -263,6 +328,9 @@ class IchiCloudStrategy(TradeStrategy):
             self.xgb_model_path = self.model_files_path / f'{self.symbol}-{self.timeframe}_0.01-min_profit_0.2-lots_right-cur_side' \
                                                           f'_{self.tenkan_period}-{self.kijun_period}-{self.senkou_b_period}' \
                                                           f'-cb-tk-tkp-sen-chi-ichi_xgb_classifier.json'
+
+        self.xgb_decision_predictor = xgb.Booster()
+        self.xgb_decision_predictor.load_model(self.xgb_model_path)
 
         self.norm_terms = self.get_normalization_terms(train_data_start_iso, train_data_end_iso)
 
@@ -280,10 +348,11 @@ class IchiCloudStrategy(TradeStrategy):
                     'kijun_period': self.kijun_period,
                     'chikou_period': self.kijun_period,
                     'senkou_b_period': self.senkou_b_period
-                },
+                }
             }
             tick_data_filepath = research.download_mt5_data(self.symbol, self.timeframe, train_data_start_iso,
                                                             train_data_end_iso)
+            print(tick_data_filepath)
             data_with_indicators = research.add_indicators_to_raw(filepath=tick_data_filepath,
                                                                   indicators_info=indicators_info,
                                                                   datetime_col='datetime')
@@ -294,12 +363,11 @@ class IchiCloudStrategy(TradeStrategy):
             train_data = train_data.iloc[start_idx:end_idx + 1]
             train_data = research.dummy_and_remove_features(train_data)
 
-            fast_ma_data = research.get_split_lstm_data(train_data, ma_window=self.fast_ma_window,
+            fast_ma_data = research.get_split_lstm_data(train_data, ma_window=self.fast_ma_window, min_batch_size=1000,
                                                         seq_len=self.lstm_seq_len, split_percents=(0, 0),
-                                                        fully_divisible_batch_sizes=True,
+                                                        fully_divisible_batch_sizes=True, max_batch_size=2000,
                                                         normalization_groups=self.normalization_groups,
-                                                        pc_cols=self.pc_cols, ma_cols=self.ma_cols, min_batch_size=1000,
-                                                        max_batch_size=2000)
+                                                        pc_cols=self.pc_cols, ma_cols=self.ma_cols, print_info=False)
             norm_terms = fast_ma_data['all_train_normalization_terms']
 
             with open(norm_terms_filepath, 'wb') as ntfp:
@@ -309,16 +377,33 @@ class IchiCloudStrategy(TradeStrategy):
 
         return norm_terms
 
-    def init_bars_buffer(self, first_bars):
-        print('start init_bars_buffer')
-        for r in first_bars:
-            print(r)
-        print('done init_bars_buffer')
+    def process_new_data(self, data_q, feature_indices):
+        if self.ma_cols_idx_set is None:
+            self.ma_cols_idx_set = {feature_indices[feat_name] for feat_name in self.ma_cols}
+            self.pc_cols_idx_set = {feature_indices[feat_name] for feat_name in self.pc_cols}
 
-    def process_new_bar(self, new_bar):
-        print('start process_new_bar')
-        print((datetime.fromtimestamp(new_bar[0], tz=timezone.utc) - timedelta(hours=self.utc_offset)), new_bar)
-        print('done process_new_bar')
+        open_trade = False
+        for sig in self.open_trade_sigs:
+            sig_i = feature_indices[sig]
+            if data_q[-1][sig_i] != 0:
+                open_trade = True
+                break
+
+        if open_trade or 1:
+            xgb_model_input_row = research.apply_perc_change_list(data_q[-2], data_q[-1], cols_set=self.pc_cols_idx_set)
+            xgb_model_input_row = self.get_reordered_feature_row(xgb_model_input_row, features=self.models_features_names)
+            xgb_model_input = pd.DataFrame([xgb_model_input_row], columns=self.models_features_names)
+            xgb_model_input = xgb.DMatrix(xgb_model_input)
+            decision_prob = self.xgb_decision_predictor.predict(xgb_model_input)[0]
+            decision_label = round(decision_prob)
+            decision_prob_diff = abs(decision_label - decision_prob)
+
+            print(f'{decision_prob}: decision_prob')
+            print(f'{decision_label}: decision_label')
+            print(f'{decision_prob_diff}: decision_prob_diff')
+            print(f'{self.decision_prob_diff_thresh}: self.decision_prob_diff_thresh')
+            if decision_prob_diff <= self.decision_prob_diff_thresh:
+                self.open_trade()
 
 
 def run_trade_strategy(strategy, strategy_kwargs, strat_name, proc_conn, mt5_login_info, exit_event):
@@ -328,6 +413,10 @@ def run_trade_strategy(strategy, strategy_kwargs, strat_name, proc_conn, mt5_log
         return False
 
     if not strategy.run():
+        return False
+
+    if not strategy.finish_up():
+        logger.error('Unable to properly finish up strategy')
         return False
 
     return True
@@ -354,10 +443,12 @@ if __name__ == '__main__':
     tb = TradeBot()
     tb.init_mt5()
 
-    name1 = tb.run_strategy(IchiCloudStrategy, strategy_kwargs={'timeframe': 'm1'}, name_suffix='1')
+    strategy_kwargs = {
+        'timeframe': 'm1',
+        'process_immediately': False
+    }
+    name1 = tb.run_strategy(IchiCloudStrategy, strategy_kwargs=strategy_kwargs, name_suffix='1')
 
     time.sleep(120)
 
     tb.stop_strategy(name1)
-
-

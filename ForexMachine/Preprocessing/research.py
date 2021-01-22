@@ -12,52 +12,26 @@ from ForexMachine import util
 from collections import namedtuple
 import tensorflow as tf
 from sklearn.preprocessing import OneHotEncoder
+from math import isclose
 
 logger = util.Logger.get_instance()
 
-TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2011-01-01', '2020-10-01'
+TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2012-01-01', '2020-10-01'
 
 
 class FeatureGenerator:
-    def __init__(self, data, feature_indices, live_trading=False, alternate_feature_names=None):
+    def __init__(self, data, feature_indices, live_trading=False):
         self.data = data
         self.feature_indices = feature_indices
         self.cross_lengths = {}
         self.temporal_features = namedtuple('temporal_features', 'quarter year month day day_of_week hour minute')
         self.live_trading = live_trading
         self.safe_start_idx = None
-
-        default_feature_names = {
-            'datetime': 'datetime',
-            'Close': 'Close',
-            'trend_visual_ichimoku_a': 'trend_visual_ichimoku_a',
-            'trend_visual_ichimoku_b': 'trend_visual_ichimoku_b',
-            'trend_ichimoku_a': 'trend_ichimoku_a',
-            'trend_ichimoku_b': 'trend_ichimoku_b',
-            'trend_ichimoku_conv': 'trend_ichimoku_conv',
-            'trend_ichimoku_base': 'trend_ichimoku_base',
-            'chikou_span': 'chikou_span',
-            'chikou_span_visual': 'chikou_span_visual'
-        }
-        if alternate_feature_names is not None:
-            default_feature_names.update(alternate_feature_names)
-        self.datetime_feat_name = default_feature_names['datetime']
-        self.close_feat_name = default_feature_names['Close']
-        self.senkou_a_visual_col_name = default_feature_names['trend_visual_ichimoku_a']
-        self.senkou_b_visual_col_name = default_feature_names['trend_visual_ichimoku_b']
-        self.senkou_a_col_name = default_feature_names['trend_ichimoku_a']
-        self.senkou_b_col_name = default_feature_names['trend_ichimoku_b']
-        self.tenken_conv_col_name = default_feature_names['trend_ichimoku_conv']
-        self.kijun_base_col_name = default_feature_names['trend_ichimoku_base']
-        self.chikou_span_col_name = default_feature_names['chikou_span']
-        self.chikou_span_visual_col_name = default_feature_names['chikou_span_visual']
-
         if not live_trading:
-            self.safe_start_idx = self._end_of_missing_data_idx(exluded_features=[self.chikou_span_visual_col_name])
+            self.safe_start_idx = self._end_of_missing_data_idx(exluded_features=['chikou_span_visual'])
 
     def get_temporal_features(self, i):
-        dt = self.data[i][self.feature_indices[self.datetime_feat_name]]
-
+        dt = self.data[i][self.feature_indices['datetime']]
         features = self.temporal_features(quarter=dt.quarter, year=dt.year, month=dt.month, day=dt.day,
                                           day_of_week=dt.dayofweek, hour=dt.hour, minute=dt.minute)
         return features
@@ -79,14 +53,14 @@ class FeatureGenerator:
         cloud_breakout_bull = False
         cloud_breakout_bear = False
 
-        close = self.feature_indices[self.close_feat_name]
-        trend_visual_ichimoku_a = self.feature_indices[self.senkou_a_visual_col_name]
-        trend_visual_ichimoku_b = self.feature_indices[self.senkou_b_visual_col_name]
-        trend_ichimoku_a = self.feature_indices[self.senkou_a_col_name]
-        trend_ichimoku_b = self.feature_indices[self.senkou_b_col_name]
-        trend_ichimoku_conv = self.feature_indices[self.tenken_conv_col_name]
-        trend_ichimoku_base = self.feature_indices[self.kijun_base_col_name]
-        chikou_span = self.feature_indices[self.chikou_span_col_name]
+        close = self.feature_indices['Close']
+        trend_visual_ichimoku_a = self.feature_indices['senkou_a_visual']
+        trend_visual_ichimoku_b = self.feature_indices['senkou_b_visual']
+        trend_ichimoku_a = self.feature_indices['senkou_a']
+        trend_ichimoku_b = self.feature_indices['senkou_b']
+        trend_ichimoku_conv = self.feature_indices['tenken_conv']
+        trend_ichimoku_base = self.feature_indices['kijun_base']
+        chikou_span = self.feature_indices['chikou_span']
 
         ### check for crosses
 
@@ -106,7 +80,7 @@ class FeatureGenerator:
                 is_price_below_cloud = False
             else:
                 is_price_inside_cloud = False
-                if self.data[i][close] <= self.data[i][cloud_bottom]:
+                if self.data[i][close] < self.data[i][cloud_bottom]:
                     is_price_above_cloud = False
                     is_price_below_cloud = True
                 else:
@@ -127,7 +101,7 @@ class FeatureGenerator:
                     if self._is_line_between_region(top_line_i, cloud_top, cloud_bottom, i) \
                             and self._is_line_between_region(bottom_line_i, cloud_top, cloud_bottom, i):
                         tk_cross = (2, 0, length)
-                    elif self.data[i][bottom_line_i] >= self.data[i][cloud_top]:
+                    elif self.data[i][bottom_line_i] > self.data[i][cloud_top]:
                         tk_cross = (3, 0, length)
                     else:
                         tk_cross = (1, 0, length)
@@ -136,7 +110,7 @@ class FeatureGenerator:
                     if self._is_line_between_region(top_line_i, cloud_top, cloud_bottom, i) \
                             and self._is_line_between_region(bottom_line_i, cloud_top, cloud_bottom, i):
                         tk_cross = (0, 2, length)
-                    elif self.data[i][top_line_i] <= self.data[i][cloud_bottom]:
+                    elif self.data[i][top_line_i] < self.data[i][cloud_bottom]:
                         tk_cross = (0, 3, length)
                     else:
                         tk_cross = (0, 1, length)
@@ -159,17 +133,17 @@ class FeatureGenerator:
 
                 # bullish
                 if first_line == close:
-                    if self.data[i][close] >= self.data[i][cloud_top]:
+                    if self.data[i][close] > self.data[i][cloud_top]:
                         tk_price_cross = (3, 0, length)
-                    elif self.data[i][close] <= self.data[i][cloud_bottom]:
+                    elif self.data[i][close] < self.data[i][cloud_bottom]:
                         tk_price_cross = (1, 0, length)
                     else:
                         tk_price_cross = (0, 0, 0)
                 # bearish
                 elif fourth_line == close:
-                    if self.data[i][close] >= self.data[i][cloud_top]:
+                    if self.data[i][close] > self.data[i][cloud_top]:
                         tk_price_cross = (0, 1, length)
-                    elif self.data[i][close] <= self.data[i][cloud_bottom]:
+                    elif self.data[i][close] < self.data[i][cloud_bottom]:
                         tk_price_cross = (0, 3, length)
                     else:
                         tk_price_cross = (0, 0, 0)
@@ -196,7 +170,7 @@ class FeatureGenerator:
                 if top_line_i == trend_ichimoku_a:
                     if self._is_line_between_region(close, cloud_top, cloud_bottom, i):
                         senkou_cross = (2, 0, length)
-                    elif self.data[i][close] >= self.data[i][cloud_top]:
+                    elif self.data[i][close] > self.data[i][cloud_top]:
                         senkou_cross = (3, 0, length)
                     else:
                         senkou_cross = (1, 0, length)
@@ -204,7 +178,7 @@ class FeatureGenerator:
                 elif top_line_i == trend_ichimoku_b:
                     if self._is_line_between_region(close, cloud_top, cloud_bottom, i):
                         senkou_cross = (0, 2, length)
-                    elif self.data[i][close] <= self.data[i][cloud_bottom]:
+                    elif self.data[i][close] < self.data[i][cloud_bottom]:
                         senkou_cross = (0, 3, length)
                     else:
                         senkou_cross = (0, 1, length)
@@ -318,8 +292,9 @@ class FeatureGenerator:
         return top_line_i, bottom_line_i
 
     def _is_line_between_region(self, target_line_i, top_line_i, bottom_line_i, i):
-        if self.data[i][target_line_i] > self.data[i][bottom_line_i] \
-                and self.data[i][target_line_i] < self.data[i][top_line_i]:
+        if self.data[i][top_line_i] > self.data[i][target_line_i] > self.data[i][bottom_line_i]\
+                or isclose(self.data[i][target_line_i], self.data[i][top_line_i])\
+                or isclose(self.data[i][target_line_i], self.data[i][bottom_line_i]):
             return True
         return False
 
@@ -397,16 +372,14 @@ class FeatureGenerator:
             else:
                 # one region is beginning to intertwine or completely swallow the other, regardless this counts
                 # as the start of an overlap
-                if self.data[i][bot_region_top] <= self.data[i][top_region_top] \
-                        and self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
+                if self.data[i][top_region_top] >= self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
                     self.cross_lengths[cross_name] = (0, old_top_region_bot)
                     return 1, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
                 logger.warning(f'weird region intertwine situation occurred (data i={i}, cross={cross_name})')
                 return 0, 0, first_line[0], second_line[0], third_line[0], fourth_line[0]
         else:
             # check for continuation of overlap
-            if self.data[i][bot_region_top] <= self.data[i][top_region_top] \
-                    and self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
+            if self.data[i][top_region_top] >= self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
                 self.cross_lengths[cross_name] = (self.cross_lengths[cross_name][0] + 1,
                                                   self.cross_lengths[cross_name][1])
                 return 0, self.cross_lengths[cross_name][0], first_line[0],\
@@ -457,8 +430,7 @@ class FeatureGenerator:
 
         if cross_name not in self.cross_lengths:
             if self.data[index][line_index1] == self.data[index][line_index2]:
-                self.cross_lengths[cross_name] = (0, old_top_line_i,
-                                                  self.data[index][self.feature_indices[self.datetime_feat_name]])
+                self.cross_lengths[cross_name] = (0, old_top_line_i, index)
                 return 1, 0, top_line_i, bottom_line_i
             logger.warning(f'weird start of line overlap situation occurred (data i={index}, cross={cross_name})')
             return 0, 0, top_line_i, bottom_line_i
@@ -472,7 +444,6 @@ class FeatureGenerator:
                 return 0, self.cross_lengths[cross_name][0], top_line_i, bottom_line_i
             else:
                 cross_old_top_line_i = self.cross_lengths[cross_name][1]
-                res = None
 
                 ## check for end of cross
 
@@ -534,22 +505,22 @@ def add_ichimoku_cloud(df: pd.DataFrame, chikou_period: int = 26, tenkan_period:
                        senkou_b_period: int = 52) -> None:
     indicator = ta.trend.IchimokuIndicator(high=df['High'], low=df['Low'], window1=tenkan_period, window2=kijun_period,
                                            window3=senkou_b_period, visual=False)
-    df['trend_ichimoku_conv'] = indicator.ichimoku_conversion_line()
-    df['trend_ichimoku_base'] = indicator.ichimoku_base_line()
-    df['trend_ichimoku_a'] = indicator.ichimoku_a()
-    df['trend_ichimoku_b'] = indicator.ichimoku_b()
+    df['tenken_conv'] = indicator.ichimoku_conversion_line()
+    df['kijun_base'] = indicator.ichimoku_base_line()
+    df['senkou_a'] = indicator.ichimoku_a()
+    df['senkou_b'] = indicator.ichimoku_b()
 
     indicator = ta.trend.IchimokuIndicator(high=df['High'], low=df['Low'], window1=tenkan_period, window2=kijun_period,
                                            window3=senkou_b_period, visual=True)
-    df['trend_visual_ichimoku_a'] = indicator.ichimoku_a()
-    df['trend_visual_ichimoku_b'] = indicator.ichimoku_b()
+    df['senkou_a_visual'] = indicator.ichimoku_a()
+    df['senkou_b_visual'] = indicator.ichimoku_b()
 
     # Chikou Span trendline of Ichimoku is not apart of 'ta' package
     add_chikou_span(df, chikou_period)
 
 
 def add_rsi(df: pd.DataFrame, periods: int = 14) -> None:
-    df['momentum_rsi'] = ta.momentum.RSIIndicator(close=df['Close'], window=periods).rsi()
+    df['rsi'] = ta.momentum.RSIIndicator(close=df['Close'], window=periods).rsi()
 
 
 def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=False, filepath=None,
@@ -970,13 +941,13 @@ def dummy_and_remove_features(data_df, categories_dict={}, cols_to_remove=[], in
         }
 
         # for some reason mt5 terminal rarely returns bar data from sundays so just remove that feature (day_of_week_6)
-        cols = {'spread', 'momentum_rsi', 'month', 'day', 'minute', 'hour', 'year', 'chikou_span_visual', 'chikou_span',
+        cols = {'spread', 'rsi', 'month', 'day', 'minute', 'hour', 'year', 'chikou_span_visual', 'chikou_span',
                 'tk_cross_bull_length', 'tk_cross_bear_length',
                 'tk_price_cross_bull_length', 'tk_price_cross_bear_length',
                 'senkou_cross_bull_length', 'senkou_cross_bear_length',
                 'chikou_cross_bull_length', 'chikou_cross_bear_length',
-                'trend_visual_ichimoku_a', 'trend_visual_ichimoku_b', 'day_of_week_6'}
-        # 'trend_ichimoku_base','trend_ichimoku_conv', 'trend_ichimoku_a', 'trend_ichimoku_b'}
+                'senkou_a_visual', 'senkou_b_visual', 'day_of_week_6'}
+        # 'kijun_base','tenken_conv', 'senkou_a', 'senkou_b'}
 
         if not keep_datetime:
             cols.add('datetime')
@@ -1356,18 +1327,17 @@ def get_split_lstm_data(preprocessed_data_df, ma_window, seq_len, split_percents
 
     if not pc_cols:
         pc_cols = ['Open', 'High', 'Low', 'Close', 'Volume',
-                   'trend_ichimoku_base', 'trend_ichimoku_conv',
-                   'trend_ichimoku_a', 'trend_ichimoku_b']
+                   'kijun_base', 'tenken_conv',
+                   'senkou_a', 'senkou_b']
 
     if not normalization_groups:
-        normalization_groups = [['Open', 'High', 'Low', 'Close'],  # prices
-                                ['trend_ichimoku_base', 'trend_ichimoku_conv'],  # ichi conv & base lines
-                                ['trend_ichimoku_a', 'trend_ichimoku_b'],  # ichi cloud lines
-                                ['tk_cross_bull_strength', 'tk_cross_bear_strength',  # tk cross strength
+        normalization_groups = [['Open', 'High', 'Low', 'Close'],
+                                ['kijun_base', 'tenken_conv'],
+                                ['senkou_a', 'senkou_b'],
+                                ['tk_cross_bull_strength', 'tk_cross_bear_strength',
                                  'tk_price_cross_bull_strength', 'tk_price_cross_bear_strength',
-                                 # tk price cross strength
-                                 'senkou_cross_bull_strength', 'senkou_cross_bear_strength',  # semkou cross strength
-                                 'chikou_cross_bull_strength', 'chikou_cross_bear_strength']]  # chikou cross strength
+                                 'senkou_cross_bull_strength', 'senkou_cross_bear_strength',
+                                 'chikou_cross_bull_strength', 'chikou_cross_bear_strength']]
 
     col_to_idx = {col_name: preprocessed_data_df.columns.get_loc(col_name) for col_name in preprocessed_data_df.columns}
 

@@ -12,10 +12,11 @@ logger = util.Logger.get_instance()
 
 
 class LiveFeatureGenerator:
-    def __init__(self, indicators, features, utc_offset, custom_settings=None):
+    def __init__(self, indicators, features, utc_offset, custom_settings=None, q_size=None):
         self.indicators_list = indicators
         self.features_list = features
         self.utc_offset = utc_offset
+        self.q_size = q_size
         self.indicators = {}
         self.features = {}
         self.custom_settings = custom_settings
@@ -25,7 +26,9 @@ class LiveFeatureGenerator:
         self.temporal_feature_names = None
         self.research_feature_generator = None
         self.all_indicators_filled_idx = None
+        self.all_features_filled_idx = None
         self.ichi_cross_names = None
+        self.lfg_setup = False
         self.default_settings = {
             'ichimoku': {
                 'tenkan_period': 9,
@@ -48,7 +51,7 @@ class LiveFeatureGenerator:
             'day_of_week': [0, 1, 2, 3, 4, 6]
         }
 
-    def process_first_bars(self, first_bars, first_bar_headers=None):
+    def setup_live_feature_generator(self, first_bars, first_bar_headers=None):
         if first_bar_headers is None:
             first_bar_headers = ['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume', 'spread', 'real_volume']
         if len(first_bar_headers) != len(first_bars[0]):
@@ -56,6 +59,9 @@ class LiveFeatureGenerator:
                          f'not equal the number of elements in each row of first_bars (len={len(first_bars[0])})')
             return False
         self.feature_indices = {first_bar_headers[i]: i for i in range(len(first_bar_headers))}
+
+        if self.q_size is None:
+            self.q_size = len(first_bars)
 
         for indicator in self.indicators_list:
             if indicator not in self.available_indicators_funcs:
@@ -87,16 +93,26 @@ class LiveFeatureGenerator:
             feature_dict['processed_bars'] = 0
             self.features[feature] = feature_dict
 
+        self.lfg_setup = True
+        return True
+
+    def process_first_bars(self, first_bars, first_bar_headers=None):
+        if not self.lfg_setup:
+            self.setup_live_feature_generator(first_bars=first_bars, first_bar_headers=first_bar_headers)
+
         for bar in first_bars:
             self.data_q.append(list(bar))
 
         for i in range(len(self.data_q)):
+            # add temporal features by default
             self.add_temporal_features(i)
 
             # calculate indicators first
             for indicator in self.indicators:
                 self.indicators[indicator]['func'](i)
 
+            # check and update oldest idx of data_q that has no None
+            # values in indicator cols, should eventually equal 0
             if self.all_indicators_filled_idx is None:
                 has_none = False
                 for elem in self.data_q[i]:
@@ -105,26 +121,69 @@ class LiveFeatureGenerator:
                         break
                 if not has_none:
                     self.all_indicators_filled_idx = i
-            elif self.all_indicators_filled_idx > 0:
-                self.all_indicators_filled_idx -= 1
 
             # then generate other features because they can depend in indicators
             for feature in self.features:
                 self.features[feature]['func'](i)
 
+            # check and update oldest idx of data_q that has no None
+            # values in all feature cols, should eventually equal 0
+            if self.all_features_filled_idx is None:
+                has_none = False
+                for elem in self.data_q[i]:
+                    if elem is None:
+                        has_none = True
+                        break
+                if not has_none:
+                    self.all_features_filled_idx = i
+
         return True
 
-    def process_new_bar(self, new_bar):
+    def process_new_bar(self, new_bar, first_bar_headers=None):
+        if not self.lfg_setup:
+            self.setup_live_feature_generator(first_bars=[new_bar], first_bar_headers=first_bar_headers)
+
         self.data_q.append(list(new_bar))
-        self.data_q.popleft()
+        while len(self.data_q) > self.q_size:
+            self.data_q.popleft()
+            if self.all_indicators_filled_idx is not None and self.all_indicators_filled_idx > 0:
+                self.all_indicators_filled_idx -= 1
+            if self.all_features_filled_idx is not None and self.all_features_filled_idx > 0:
+                self.all_features_filled_idx -= 1
         data_idx = len(self.data_q) - 1
+
+        # add temporal features by default
         self.add_temporal_features(data_idx)
+
         # calculate indicators first
         for indicator in self.indicators:
             self.indicators[indicator]['func'](data_idx)
+
+        # check and update oldest idx of data_q that has no None values in indicator cols, should eventually equal 0
+        if self.all_indicators_filled_idx is None:
+            has_none = False
+            for elem in self.data_q[data_idx]:
+                if elem is None:
+                    has_none = True
+                    break
+            if not has_none:
+                self.all_indicators_filled_idx = data_idx
+
         # then generate other features because they can depend in indicators
         for feature in self.features:
             self.features[feature]['func'](data_idx)
+
+        # check and update oldest idx of data_q that has no None
+        # values in all feature cols, should eventually equal 0
+        if self.all_features_filled_idx is None:
+            has_none = False
+            for elem in self.data_q[i]:
+                if elem is None:
+                    has_none = True
+                    break
+            if not has_none:
+                self.all_features_filled_idx = i
+
         return True
 
     def add_temporal_features(self, data_idx):
@@ -221,18 +280,7 @@ class LiveFeatureGenerator:
         row = self.data_q[data_idx]
 
         if self.research_feature_generator is None:
-            alt_feat_names = {
-                'datetime': 'timestamp',
-                'trend_visual_ichimoku_a': 'senkou_a_visual',
-                'trend_visual_ichimoku_b': 'senkou_b_visual',
-                'trend_ichimoku_a': 'senkou_a',
-                'trend_ichimoku_b': 'senkou_b',
-                'trend_ichimoku_conv': 'tenken_conv',
-                'trend_ichimoku_base': 'kijun_base',
-            }
-            self.research_feature_generator = FeatureGenerator(self.data_q, self.feature_indices,
-                                                               live_trading=True,
-                                                               alternate_feature_names=alt_feat_names)
+            self.research_feature_generator = FeatureGenerator(self.data_q, self.feature_indices, live_trading=True)
             self.ichi_cross_names = ['tk_cross', 'tk_price_cross', 'senkou_cross', 'chikou_cross']
 
         is_price_above_cb_lines = None
@@ -306,7 +354,10 @@ if __name__ == '__main__':
 
     mt5.initialize()
 
-    rates = mt5.copy_rates_from_pos('EURUSD', mt5.TIMEFRAME_H1, 1, 200)
+    start_bar = 1
+    num_bars = 400
+
+    rates = mt5.copy_rates_from_pos('EURUSD', mt5.TIMEFRAME_H1, start_bar, num_bars)
 
     custom_settings = {
         'ichimoku': {
@@ -318,11 +369,14 @@ if __name__ == '__main__':
     }
 
     lfg = LiveFeatureGenerator(indicators=['ichimoku'], features=['ichimoku_signals'], utc_offset=2,
-                               custom_settings=custom_settings)
+                               custom_settings=custom_settings, q_size=num_bars)
 
     s = time.time()
     lfg.process_first_bars(rates)
     d = (time.time() - s) * 1000
+
+    # for bar in rates:
+    #     lfg.process_new_bar(bar)
 
     # for i, row in enumerate(lfg.data_q):
     #     print(i, len(row), row)
@@ -363,42 +417,31 @@ if __name__ == '__main__':
     lfg_df_cols = set(lfg_df.columns)
     train_data_cols = set(train_data.columns)
 
-    lfg_to_train_data_col_names = {
-        'senkou_a_visual': 'trend_visual_ichimoku_a',
-        'senkou_b_visual': 'trend_visual_ichimoku_b',
-        'senkou_a': 'trend_ichimoku_a',
-        'senkou_b': 'trend_ichimoku_b',
-        'tenken_conv': 'trend_ichimoku_conv',
-        'kijun_base': 'trend_ichimoku_base',
-    }
-
     non_matching = 0
+    non_matching_cols = set()
     for col in lfg_df_cols:
-        if col in train_data_cols or col in lfg_to_train_data_col_names:
+        if col in train_data_cols:
             for i in range(lfg_df.shape[0]):
                 lfg_df_val = lfg_df.iloc[i][lfg_df.columns.get_loc(col)]
                 if not pd.isnull(lfg_df_val):
-                    train_data_col_name = col
-                    if col in lfg_to_train_data_col_names:
-                        train_data_col_name = lfg_to_train_data_col_names[col]
-                    train_data_val = train_data.iloc[i][train_data.columns.get_loc(train_data_col_name)]
+                    train_data_val = train_data.iloc[i][train_data.columns.get_loc(col)]
+                    matching = True
                     if isinstance(lfg_df_val, (np.floating, float)):
                         if not np.isclose(lfg_df_val, train_data_val):
-                            print(f'non-matching data in col "{col}" and row {i}, rows:')
-                            print(list(lfg_df.iloc[i]))
-                            print(list(train_data.iloc[i]))
-                            print(lfg_df_val)
-                            print(train_data_val)
-                            non_matching += 1
+                            matching = False
                     else:
                         if lfg_df_val != train_data_val:
-                            print(f'non-matching data in col "{col}" and row {i}, rows:')
-                            print(list(lfg_df.iloc[i]))
-                            print(list(train_data.iloc[i]))
-                            print(lfg_df_val)
-                            print(train_data_val)
-                            non_matching += 1
+                            matching = False
+                    if not matching:
+                        non_matching_cols.add(col)
+                        print(f'non-matching data in col "{col}" and row {i}, rows:')
+                        print(f'lfg row: {list(lfg_df.iloc[i])}')
+                        print(f'train_data row: {list(train_data.iloc[i])}')
+                        print(f'lfg val: {lfg_df_val}')
+                        print(f'train_data val: {train_data_val}\n')
+                        non_matching += 1
     print(f'non_matching: {non_matching}')
+    print(f'non_matching_cols: {non_matching_cols}')
     print(lfg_df.shape)
     print(train_data.shape)
 
