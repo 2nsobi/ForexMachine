@@ -292,8 +292,8 @@ class FeatureGenerator:
         return top_line_i, bottom_line_i
 
     def _is_line_between_region(self, target_line_i, top_line_i, bottom_line_i, i):
-        if self.data[i][top_line_i] > self.data[i][target_line_i] > self.data[i][bottom_line_i]\
-                or isclose(self.data[i][target_line_i], self.data[i][top_line_i])\
+        if self.data[i][top_line_i] > self.data[i][target_line_i] > self.data[i][bottom_line_i] \
+                or isclose(self.data[i][target_line_i], self.data[i][top_line_i]) \
                 or isclose(self.data[i][target_line_i], self.data[i][bottom_line_i]):
             return True
         return False
@@ -382,7 +382,7 @@ class FeatureGenerator:
             if self.data[i][top_region_top] >= self.data[i][bot_region_top] >= self.data[i][top_region_bot]:
                 self.cross_lengths[cross_name] = (self.cross_lengths[cross_name][0] + 1,
                                                   self.cross_lengths[cross_name][1])
-                return 0, self.cross_lengths[cross_name][0], first_line[0],\
+                return 0, self.cross_lengths[cross_name][0], first_line[0], \
                        second_line[0], third_line[0], fourth_line[0]
             # otherwise, 1 region must be completely above the other
             else:
@@ -523,8 +523,20 @@ def add_rsi(df: pd.DataFrame, periods: int = 14) -> None:
     df['rsi'] = ta.momentum.RSIIndicator(close=df['Close'], window=periods).rsi()
 
 
-def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=False, filepath=None,
-                      cache_path=None):
+def download_mt5_data(symbol, resolution, start_time=None, end_time=None, mt5_initialized=False, filepath=None,
+                      cache_path=None, bar_start_pos=None, bar_count=None):
+    if (start_time is None and end_time is None) and (bar_start_pos is None and bar_count is None):
+        print('Either start_time & end_time or bar_start_pos & bar_count must be specified to download mt5 data')
+        return
+
+    if (start_time is not None and end_time is None) or (start_time is None and end_time is not None):
+        print('Both start_time and end_time must be specified to download mt5 data')
+        return
+
+    if (bar_start_pos is not None and bar_count is None) or (bar_start_pos is None and bar_count is not None):
+        print('Both bar_start_pos and bar_count must be specified to download mt5 data')
+        return
+
     timeframes = {
         'm1': mt5.TIMEFRAME_M1,
         'm2': mt5.TIMEFRAME_M2,
@@ -560,23 +572,27 @@ def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=
             print('failed to initialize MT5 terminal')
             return
 
-    start_time = datetime.fromisoformat(start_time)
-    start_time = datetime(start_time.year, start_time.month, start_time.day, hour=start_time.hour,
-                          minute=start_time.minute, second=start_time.second, tzinfo=timezone.utc)
-    cur_start_time = start_time
-
-    end_time = datetime.fromisoformat(end_time)
-    end_time = datetime(end_time.year, end_time.month, end_time.day, hour=end_time.hour, minute=end_time.minute,
-                        second=end_time.second, tzinfo=timezone.utc)
-
     if cache_path is None:
         cache_path = util.get_ticks_data_dir()
     else:
         cache_path = Path(cache_path).resolve()
 
-    dt_save_form = '%Y-%m-%dT%H;%M%Z'
-    default_filepath = cache_path / f'mt5_{symbol}_{resolution}_ticks_{start_time.strftime(dt_save_form)}' \
-                                    f'_to_{end_time.strftime(dt_save_form)}.csv'
+    if start_time is not None:
+        start_time = datetime.fromisoformat(start_time)
+        start_time = datetime(start_time.year, start_time.month, start_time.day, hour=start_time.hour,
+                              minute=start_time.minute, second=start_time.second, tzinfo=timezone.utc)
+        cur_start_time = start_time
+
+        end_time = datetime.fromisoformat(end_time)
+        end_time = datetime(end_time.year, end_time.month, end_time.day, hour=end_time.hour, minute=end_time.minute,
+                            second=end_time.second, tzinfo=timezone.utc)
+
+        dt_save_form = '%Y-%m-%dT%H;%M%Z'
+        default_filepath = cache_path / f'mt5_{symbol}_{resolution}_ticks_{start_time.strftime(dt_save_form)}' \
+                                        f'_to_{end_time.strftime(dt_save_form)}.csv'
+    elif bar_start_pos is not None:
+        default_filepath = cache_path / f'mt5_{symbol}_{resolution}_ticks_from_{bar_start_pos}_bar' \
+                                        f'_{bar_count}_count.csv'
 
     if not default_filepath.parent.is_dir():
         print(f'{default_filepath.parent} does not exist, returning')
@@ -598,68 +614,74 @@ def download_mt5_data(symbol, resolution, start_time, end_time, mt5_initialized=
         time_skip = timedelta(days=365)
         retries = 0
         files_to_merge = []
-        while cur_start_time < end_time:
-            cur_end_time = cur_start_time + time_skip
-            cur_end_time = min((cur_end_time - cur_start_time, cur_end_time), (end_time - cur_start_time, end_time),
-                               key=lambda tup: tup[0])[1]
-
-            cur_ticks_batch = mt5.copy_rates_range(symbol, time_frame, cur_start_time, cur_end_time)
-            if cur_ticks_batch is not None:
-                if len(cur_ticks_batch) == 0:
-                    print(f'no tick data returned by mt5 terminal for time range of {cur_start_time} '
-                          f'to {cur_end_time}')
-
-            res = mt5.last_error()
-            if res[0] == 1:
-                print(f'successfully retrieved {len(cur_ticks_batch)} rows of tick data '
-                      f'for time range of {cur_start_time} to {cur_end_time}')
-            # "No IPC connection" error
-            elif res[0] == -10004:
-                print(f'{res} lost connection to mt5 terminal')
-
-                if retries < 3:
-                    print('retrying...')
-                    if not mt5.initialize(portable=True):
-                        print('failed to initialize MT5 terminal')
-                        return
-                    retries += 1
-                    continue
-            # any other mt5 error: https://www.mql5.com/en/docs/integration/python_metatrader5/mt5lasterror_py
-            else:
-                print(f'failed to retrieve tick data from MT5 terminal for {symbol} {resolution} data for '
-                      f'time range of {cur_start_time} to {cur_end_time}')
-                print('error from mt5:')
-                print(res)
-                if retries < 3:
-                    retries += 1
-                    print('retrying...')
-                    continue
-
-            # temporarily save data from mt5 terminal because it can sometimes run out of memory if RAM is close to max
-            if cur_ticks_batch is not None and len(cur_ticks_batch) > 0:
-                temp_cache_path = util.get_temp_dir() / f'temp_mt5_{symbol}_{resolution}_ticks_' \
-                                                        f'{cur_start_time.strftime(dt_save_form)}_to_{cur_end_time.strftime(dt_save_form)}.npy'
-                np.save(temp_cache_path, cur_ticks_batch)
-                files_to_merge.append(temp_cache_path)
-
-            cur_start_time += time_skip
-            retries = 0
-
         ticks = None
-        if len(files_to_merge) > 0:
-            ticks = np.load(files_to_merge[0])
-            if len(files_to_merge) > 1:
-                print('starting to concatenate all downloaded data...')
-                for i, file_path in enumerate(files_to_merge[1:]):
-                    ticks_to_append = np.load(file_path)
-                    ticks = np.append(ticks, ticks_to_append, axis=0)
-                    print(f'concatenated {i + 2}/{len(files_to_merge)} downloaded datasets')
 
-            for file_path in files_to_merge:
-                os.remove(file_path)
-        else:
-            print('no tick data retrieved, done.')
-            return
+        if start_time is not None:
+            while cur_start_time < end_time:
+                cur_end_time = cur_start_time + time_skip
+                cur_end_time = min((cur_end_time - cur_start_time, cur_end_time), (end_time - cur_start_time, end_time),
+                                   key=lambda tup: tup[0])[1]
+
+                cur_ticks_batch = mt5.copy_rates_range(symbol, time_frame, cur_start_time, cur_end_time)
+                if cur_ticks_batch is not None:
+                    if len(cur_ticks_batch) == 0:
+                        print(f'no tick data returned by mt5 terminal for time range of {cur_start_time} '
+                              f'to {cur_end_time}')
+
+                res = mt5.last_error()
+                if res[0] == 1:
+                    print(f'successfully retrieved {len(cur_ticks_batch)} rows of tick data '
+                          f'for time range of {cur_start_time} to {cur_end_time}')
+                # "No IPC connection" error
+                elif res[0] == -10004:
+                    print(f'{res} lost connection to mt5 terminal')
+
+                    if retries < 3:
+                        print('retrying...')
+                        if not mt5.initialize(portable=True):
+                            print('failed to initialize MT5 terminal')
+                            return
+                        retries += 1
+                        continue
+                # any other mt5 error: https://www.mql5.com/en/docs/integration/python_metatrader5/mt5lasterror_py
+                else:
+                    print(f'failed to retrieve tick data from MT5 terminal for {symbol} {resolution} data for '
+                          f'time range of {cur_start_time} to {cur_end_time}')
+                    print('error from mt5:')
+                    print(res)
+                    if retries < 3:
+                        retries += 1
+                        print('retrying...')
+                        continue
+
+                # temporarily save data from mt5 terminal because it can
+                # sometimes run out of memory if RAM is close to max
+                if cur_ticks_batch is not None and len(cur_ticks_batch) > 0:
+                    temp_cache_path = util.get_temp_dir() / f'temp_mt5_{symbol}_{resolution}_ticks_' \
+                                                            f'{cur_start_time.strftime(dt_save_form)}_to_' \
+                                                            f'{cur_end_time.strftime(dt_save_form)}.npy'
+                    np.save(temp_cache_path, cur_ticks_batch)
+                    files_to_merge.append(temp_cache_path)
+
+                cur_start_time += time_skip
+                retries = 0
+
+            if len(files_to_merge) > 0:
+                ticks = np.load(files_to_merge[0])
+                if len(files_to_merge) > 1:
+                    print('starting to concatenate all downloaded data...')
+                    for i, file_path in enumerate(files_to_merge[1:]):
+                        ticks_to_append = np.load(file_path)
+                        ticks = np.append(ticks, ticks_to_append, axis=0)
+                        print(f'concatenated {i + 2}/{len(files_to_merge)} downloaded datasets')
+
+                for file_path in files_to_merge:
+                    os.remove(file_path)
+            else:
+                print('no tick data retrieved, done.')
+                return
+        elif bar_start_pos is not None:
+            ticks = mt5.copy_rates_from_pos(symbol, time_frame, bar_start_pos, bar_count)
 
         ticks = ticks.tolist()
         # row[1:-1] should get all tick data besides the date and 'real_volume' column
@@ -783,7 +805,7 @@ def add_ichimoku_features(df, inplace=False, negative_bears=True, include_most_r
 
             bull_length = None
             bear_length = None
-            if cross_length is not None:   # if cross_length is None bull_length and bear_length should be too
+            if cross_length is not None:  # if cross_length is None bull_length and bear_length should be too
                 if bull_strength > bear_strength:
                     bull_length = cross_length
                     bear_length = 0
@@ -937,16 +959,17 @@ def dummy_and_remove_features(data_df, categories_dict={}, cols_to_remove=[], in
     if include_defaults:
         cd = {
             'quarter': [1, 2, 3, 4],
-            'day_of_week': [0, 1, 2, 3, 4, 6]
+            'day_of_week': [0, 1, 2, 3, 4, 5, 6]
         }
 
         # for some reason mt5 terminal rarely returns bar data from sundays so just remove that feature (day_of_week_6)
+        # and remove saturday feature (day_of_week_5) because it is possible to get saturday bars from mt5
         cols = {'spread', 'rsi', 'month', 'day', 'minute', 'hour', 'year', 'chikou_span_visual', 'chikou_span',
                 'tk_cross_bull_length', 'tk_cross_bear_length',
                 'tk_price_cross_bull_length', 'tk_price_cross_bear_length',
                 'senkou_cross_bull_length', 'senkou_cross_bear_length',
                 'chikou_cross_bull_length', 'chikou_cross_bear_length',
-                'senkou_a_visual', 'senkou_b_visual', 'day_of_week_6'}
+                'senkou_a_visual', 'senkou_b_visual', 'day_of_week_5', 'day_of_week_6'}
         # 'kijun_base','tenken_conv', 'senkou_a', 'senkou_b'}
 
         if not keep_datetime:
@@ -1114,11 +1137,15 @@ def normalize_data(df, train_data, groups=None, normalization_terms=None):
     return df, normalization_terms
 
 
-def normalize_data_list(row, normalization_terms):
+def normalize_data_list(row, normalization_terms, cols_names=None):
     new_row = []
     for col_i in range(len(row)):
-        if col_i in normalization_terms:
-            min_value, max_value = normalization_terms[col_i]
+        norms_term_key = col_i
+        if cols_names is not None:
+            norms_term_key = cols_names[col_i]
+
+        if norms_term_key in normalization_terms:
+            min_value, max_value = normalization_terms[norms_term_key]
 
             if min_value != max_value:
                 normalized = (row[col_i] - min_value) / (max_value - min_value)
@@ -1155,15 +1182,15 @@ def apply_moving_avg(df, cols, window):
     return df
 
 
-def apply_moving_avg_q(q, cols_set):
-    n_rows, n_cols = len(q), len(q[0])
+def apply_moving_avg_q(q, cols_set, window, reverse_start_idx=1):
+    n_rows, n_cols = window, len(q[0])
     new_row = []
     for col in range(n_cols):
         if col in cols_set:
-            avg = sum([row[col] for row in q]) / n_rows
+            avg = sum([q[-i][col] for i in range(reverse_start_idx, reverse_start_idx + n_rows)]) / n_rows
             new_row.append(avg)
         else:
-            new_row.append(q[-1][col])
+            new_row.append(q[-reverse_start_idx][col])
     return new_row
 
 
@@ -1284,7 +1311,7 @@ def get_margin(trades, buy_label, sell_label, contract_size, leverage, traderswa
 
     margin = hedged_volume_margin + uncovered_volume_margin
     if tradersway_commodity:
-        margin *= 2  # idk
+        margin *= 2  # idk why but constant w/ test trades on tradersway demo acct on mt5 app
     return margin
 
 
@@ -1563,7 +1590,7 @@ def generate_ichimoku_labels(df, min_profit_percent=0.003, profit_noise_percent=
             label = ['sell', ticks_till_peak, trade[f'{decision}_decision_best_sell_profit'][0],
                      trade[f'{decision}_decision_best_sell_profit'][1]]
 
-        scaled_min_profit = min_profit if not in_quote_currency else min_profit / current_close_price
+        scaled_min_profit = min_profit if not in_quote_currency else min_profit * current_close_price
         if label and label[2] < scaled_min_profit and not no_waits and not leftover:
             label = ['wait', 0, 0, None]
 
@@ -1630,20 +1657,22 @@ def generate_ichimoku_labels(df, min_profit_percent=0.003, profit_noise_percent=
             buy_profit = get_profit(close_price, trade_open_price, pip_value, pip_resolution, in_quote_currency)
             sell_profit = buy_profit * -1
 
-            scaled_profit_noise = profit_noise if not in_quote_currency else profit_noise / close_price
+            scaled_profit_noise = profit_noise if not in_quote_currency else profit_noise * close_price
             if abs(buy_profit) >= scaled_profit_noise:
                 trade['consider_profit'] = True
 
             if not trade['first_decision_done']:
-                if not trade['first_decision_best_buy_profit'] or trade['first_decision_best_buy_profit'][
-                    0] < buy_profit:
+                if not trade['first_decision_best_buy_profit'] \
+                        or trade['first_decision_best_buy_profit'][0] < buy_profit:
                     trade['first_decision_best_buy_profit'] = (buy_profit, i,
-                                                               f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+                                                               f'debug notes: ({close_price} - {trade_open_price}) '
+                                                               f'/ {pip_resolution} * {pip_value}')
 
-                if not trade['first_decision_best_sell_profit'] or trade['first_decision_best_sell_profit'][
-                    0] < sell_profit:
+                if not trade['first_decision_best_sell_profit'] \
+                        or trade['first_decision_best_sell_profit'][0] < sell_profit:
                     trade['first_decision_best_sell_profit'] = (sell_profit, i,
-                                                                f'debug notes: ({close_price} - {trade_open_price}) / {pip_resolution} * {pip_value}')
+                                                                f'debug notes: ({close_price} - {trade_open_price}) '
+                                                                f'/ {pip_resolution} * {pip_value}')
 
                 # test for end of 1st decision: see if current close price crossed the intial price at which the trade was opened at
                 # note: only look for crosses after profit has exceeded profit_noise (small amounts of profit w/ respect to lots_per_trade and in_quote_currency)

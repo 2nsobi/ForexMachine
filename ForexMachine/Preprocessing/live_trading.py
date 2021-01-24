@@ -17,11 +17,12 @@ class LiveFeatureGenerator:
         self.features_list = features
         self.utc_offset = utc_offset
         self.q_size = q_size
-        self.indicators = {}
-        self.features = {}
         self.custom_settings = custom_settings
         self.data_q = deque()
+        self.indicators = {}
+        self.features = {}
         self.feature_indices = {}
+        self.feature_indices_keys = None
         self.temporal_enc = None
         self.temporal_feature_names = None
         self.research_feature_generator = None
@@ -48,7 +49,7 @@ class LiveFeatureGenerator:
         }
         self.temporal_categories = {
             'quarter': [1, 2, 3, 4],
-            'day_of_week': [0, 1, 2, 3, 4, 6]
+            'day_of_week': [0, 1, 2, 3, 4, 5, 6]
         }
 
     def setup_live_feature_generator(self, first_bars, first_bar_headers=None):
@@ -137,6 +138,9 @@ class LiveFeatureGenerator:
                 if not has_none:
                     self.all_features_filled_idx = i
 
+        if self.feature_indices_keys is None:
+            self.feature_indices_keys = list(self.feature_indices.keys())
+
         return True
 
     def process_new_bar(self, new_bar, first_bar_headers=None):
@@ -177,12 +181,15 @@ class LiveFeatureGenerator:
         # values in all feature cols, should eventually equal 0
         if self.all_features_filled_idx is None:
             has_none = False
-            for elem in self.data_q[i]:
+            for elem in self.data_q[data_idx]:
                 if elem is None:
                     has_none = True
                     break
             if not has_none:
-                self.all_features_filled_idx = i
+                self.all_features_filled_idx = data_idx
+
+        if self.feature_indices_keys is None:
+            self.feature_indices_keys = list(self.feature_indices.keys())
 
         return True
 
