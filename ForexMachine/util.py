@@ -4,10 +4,11 @@ import logging
 import linecache
 import inspect
 
+
 PACKAGE_ROOT_DIR = Path(__file__).parent.resolve()
 TICKS_DATA_DIR = PACKAGE_ROOT_DIR / './PackageData/TicksData'
 MODEL_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/ModelFiles'
-LIVE_TRADE_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/LiveTradingFiles'
+LIVE_TRADE_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/.LiveTradingFiles'
 TEMP_DIR = PACKAGE_ROOT_DIR / './PackageData/.temp'
 
 

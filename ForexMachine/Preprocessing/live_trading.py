@@ -22,7 +22,7 @@ class LiveFeatureGenerator:
         self.indicators = {}
         self.features = {}
         self.feature_indices = {}
-        self.feature_indices_keys = None
+        self.feature_indices_keys = []
         self.temporal_enc = None
         self.temporal_feature_names = None
         self.research_feature_generator = None
@@ -138,7 +138,7 @@ class LiveFeatureGenerator:
                 if not has_none:
                     self.all_features_filled_idx = i
 
-        if self.feature_indices_keys is None:
+        if len(self.feature_indices_keys) == 0:
             self.feature_indices_keys = list(self.feature_indices.keys())
 
         return True
@@ -188,7 +188,7 @@ class LiveFeatureGenerator:
             if not has_none:
                 self.all_features_filled_idx = data_idx
 
-        if self.feature_indices_keys is None:
+        if len(self.feature_indices_keys) == 0:
             self.feature_indices_keys = list(self.feature_indices.keys())
 
         return True

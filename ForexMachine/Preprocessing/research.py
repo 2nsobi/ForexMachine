@@ -567,7 +567,7 @@ def download_mt5_data(symbol, resolution, start_time=None, end_time=None, mt5_in
     time_frame = timeframes[resolution]
 
     if not mt5_initialized:
-        res = mt5.initialize(portable=True)
+        res = mt5.initialize()
         if not res:
             print('failed to initialize MT5 terminal')
             return
@@ -577,6 +577,7 @@ def download_mt5_data(symbol, resolution, start_time=None, end_time=None, mt5_in
     else:
         cache_path = Path(cache_path).resolve()
 
+    dt_save_form = '%Y-%m-%dT%H;%M%Z'
     if start_time is not None:
         start_time = datetime.fromisoformat(start_time)
         start_time = datetime(start_time.year, start_time.month, start_time.day, hour=start_time.hour,
@@ -587,12 +588,12 @@ def download_mt5_data(symbol, resolution, start_time=None, end_time=None, mt5_in
         end_time = datetime(end_time.year, end_time.month, end_time.day, hour=end_time.hour, minute=end_time.minute,
                             second=end_time.second, tzinfo=timezone.utc)
 
-        dt_save_form = '%Y-%m-%dT%H;%M%Z'
         default_filepath = cache_path / f'mt5_{symbol}_{resolution}_ticks_{start_time.strftime(dt_save_form)}' \
                                         f'_to_{end_time.strftime(dt_save_form)}.csv'
     elif bar_start_pos is not None:
+        current_utc_dt = datetime.now(tz=timezone.utc)
         default_filepath = cache_path / f'mt5_{symbol}_{resolution}_ticks_from_{bar_start_pos}_bar' \
-                                        f'_{bar_count}_count.csv'
+                                        f'_{bar_count}_count_on_{current_utc_dt.strftime(dt_save_form)}.csv'
 
     if not default_filepath.parent.is_dir():
         print(f'{default_filepath.parent} does not exist, returning')

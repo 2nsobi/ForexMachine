@@ -16,6 +16,7 @@ from pathlib import Path
 import configparser
 import subprocess
 import os
+import hashlib
 
 import tensorflow as tf
 
@@ -33,7 +34,7 @@ import tensorflow as tf
 
 logger = util.Logger.get_instance()
 
-timeframes = {
+TIMEFRAMES = {
     'M1': (mt5.TIMEFRAME_M1, 60 * 1),
     'M2': (mt5.TIMEFRAME_M2, 60 * 2),
     'M3': (mt5.TIMEFRAME_M3, 60 * 3),
@@ -54,10 +55,12 @@ timeframes = {
     'H12': (mt5.TIMEFRAME_H12, 60 * 60 * 12),
     'W1': (mt5.TIMEFRAME_W1, 60 * 60 * 24 * 7),
 }
+TRADE_DECISION_STRINGS = {1: 'buy', 0: 'sell'}
 
 
 class TradeBot:
-    def __init__(self):
+    def __init__(self, debug_mode=False):
+        self.debug_mode = debug_mode
         self.strats = {}
         self.mt5_login_info = {}
 
@@ -124,121 +127,224 @@ class TradeBot:
         # get MT5 terminal initialization and login info from stdin
         if 'trade_server' not in self.mt5_login_info:
             self.mt5_login_info['trade_server'] = input(
-                'Please enter MT5 server name (i.e. "MetaQuotes-Demo", "TradersWay-Live"): ')
+                'Please enter MT5 broker server name (i.e. "MetaQuotes-Demo", "TradersWay-Live"): ')
         if 'login_id' not in self.mt5_login_info:
             while True:
                 try:
-                    login_id = int(input('Please enter login ID: '))
+                    login_id = int(input('Please enter MT5 account login ID: '))
                     self.mt5_login_info['login_id'] = login_id
                     break
                 except ValueError:
                     print('Invalid login ID, ID must be interpretable as an integer')
         if 'password' not in self.mt5_login_info:
-            self.mt5_login_info['password'] = getpass.getpass(prompt='Please enter password: ')
+            self.mt5_login_info['password'] = getpass.getpass(prompt='Please enter MT5 account password: ')
 
         return True
 
-    def run_strategy(self, strategy, strategy_kwargs={}, name_suffix=None):
-        if name_suffix is not None:
-            strat_name = f'{strategy.name}_{name_suffix}'
-            if strat_name in self.strats:
-                logger.error('Strategy already running with name "{strat_name}"')
-                return
-        else:
-            strat_name = strategy.name
-            i = 1
-            while strat_name in self.strats:
-                strat_name = f'{strategy.name}_{i}'
-                i += 1
+    def run_strategy(self, strategy, strategy_kwargs={}, base_strategy_kwargs={}, name=None):
+        if name is None:
+            name = strategy.default_name
+        if name in self.strats:
+            logger.error(f'Strategy already running with name: {name}')
+            return
+
         parent_conn, child_conn = mltp.Pipe(duplex=True)
         exit_event = mltp.Event()
-        proc = mltp.Process(target=run_trade_strategy, args=(strategy, strategy_kwargs, strat_name, child_conn,
-                                                             self.mt5_login_info, exit_event))
-        self.strats[strat_name] = {
+        debug_exit_event = mltp.Event()
+        proc = mltp.Process(target=run_trade_strategy, args=(strategy, strategy_kwargs, base_strategy_kwargs,
+                                                             name, child_conn, exit_event, self.mt5_login_info,
+                                                             self.debug_mode, debug_exit_event))
+        self.strats[name] = {
             'parent_connection': parent_conn,
             'child_connection': child_conn,
             'process': proc,
             'strategy_kwargs': strategy_kwargs,
-            'exit_event': exit_event
+            'exit_event': exit_event,
+            'debug_exit_event': debug_exit_event
         }
         proc.start()
-        return strat_name
+        return name
 
-    def stop_strategy(self, strat_name):
-        self.strats[strat_name]['exit_event'].set()
-        self.strats[strat_name]['process'].join()
-        print(f'Stopped strategy with name: {strat_name}')
+    def send_command(self, strat_name, cmd, args=()):
+        if not isinstance(args, tuple):
+            logger.error(f'args must be a tuple: {args}')
+        self.strats[strat_name]['parent_connection'].send((cmd, args))
+        self.strats[strat_name]['debug_exit_event'].set()
+
+    def stop_strategy(self, name):
+        if name not in self.strats:
+            logger.error(f'No strategy running with name: {name}')
+        self.strats[name]['exit_event'].set()
+        self.strats[name]['debug_exit_event'].set()
+        self.strats[name]['process'].join()
+        del self.strats[name]
+        print(f'Stopped strategy with name: {name}')
 
 
 class TradeStrategy:
-    def __init__(self):
-        self.name = None
-        self.ea_id = None
-        self.proc_conn = None
-        self.mt5_terminal_info = None
-        self.mt5_account_info = None
-        self.mt5_login_info = {}
-        self.symbol = None
-        self.timeframe = None
-        self.mt5_timeframe = None
-        self.data = deque()
-        self.update_delta = None  # in secs
-        self.bar_buffer_size = 300  # size of bar q
-        self.utc_offset = None
-        self.exit_event = None
-        self.last_completed_bar_timestamp = None
-        self.lfg = None
-        self.max_concurrent_trades = np.inf
-        self.indicators = []
-        self.features = []
-        self.custom_settings = {}
-        self.trades = None
-        self.process_immediately = False
-        self.check_if_market_is_closed = True
-        self.lots_per_trade = None
-        self.trade_decision_strings = None
+    default_name = 'default_strategy'
 
-    def setup_trade_strategy_process(self, strat_name, proc_conn, mt5_login_info, exit_event):
-        self.name = strat_name
-        self.ea_id = hash(self.name) % ((sys.maxsize + 1) * 2)
-        self.proc_conn = proc_conn
+    __name = None
+    __proc_conn = None
+    __mt5_terminal_info = None
+    __mt5_account_info = None
+    __mt5_timeframe = None
+    __update_delta = None  # in secs
+    __exit_event = None
+    __debug_exit_event = None
+    __last_completed_bar_timestamp = None
+    __lfg = None
+    __trades = {}
+    __pip_resolution = None
+    __pip_value = None
+    __trades_filepath = None
+    __commands = None
+
+    def __init__(self, symbol=None, timeframe=None, ea_id=None, mt5_login_info=None, bar_buffer_size=300,
+                 detect_utc_offset=False, utc_offset=2, max_concurrent_trades=np.inf, indicators=[], features=[],
+                 custom_feature_settings={}, process_immediately=False, check_if_market_is_closed=True,
+                 lots_per_trade=None, debug_mode=None):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.ea_id = ea_id
         self.mt5_login_info = mt5_login_info
-        self.mt5_timeframe, self.update_delta = timeframes[self.timeframe]
-        self.exit_event = exit_event
-        self.trades = {}
-        self.trade_decision_strings = {1: 'buy', 0: 'sell'}
+        self.bar_buffer_size = bar_buffer_size  # size of bar q
+        self.detect_utc_offset = detect_utc_offset
+        self.utc_offset = utc_offset  # utc offset of mt5 terminal, +2 hours for me on east coast of states but maybe diff for others
+        self.max_concurrent_trades = max_concurrent_trades
+        self.indicators = indicators
+        self.features = features
+        self.custom_feature_settings = custom_feature_settings
+        self.process_immediately = process_immediately
+        self.check_if_market_is_closed = check_if_market_is_closed
+        self.lots_per_trade = lots_per_trade
+        self.debug_mode = debug_mode
 
-        if not hasattr(self, 'check_if_market_is_closed'):
-            self.check_if_market_is_closed = True
+    def get_strat_name(self):
+        return self.__name
 
+    def get_terminal_info(self):
+        return self.__mt5_terminal_info
+
+    def get_account_info(self):
+        return self.__mt5_account_info
+
+    def get_trades(self):
+        return self.__trades
+
+    def get_lfg_feature_indices_keys(self):
+        return self.__lfg.feature_indices_keys
+
+    def dump_data_q(self, path=None):
+        data_q_df = pd.DataFrame(self.__lfg.data_q, columns=self.get_lfg_feature_indices_keys())
+        if path is None:
+            path = f'./{self.__name}_strategy_data_q.csv'
+        data_q_df.to_csv(path)
+        print(f'Dumped data queue of {self.__name} strategy to {Path(path).resolve()}')
+
+    def setup_trade_strategy_process(self, strat_name, proc_conn, exit_event, mt5_login_info, base_strategy_kwargs,
+                                     debug_mode, debug_exit_event):
+        self.__name = strat_name
+        self.__proc_conn = proc_conn
+        self.__exit_event = exit_event
+        self.__debug_exit_event = debug_exit_event
+        self.mt5_login_info = mt5_login_info
+
+        # sync up default class attributes with any child instances
+        default_strat_attrs = TradeStrategy().__dict__
+        for key, val in default_strat_attrs.items():
+            if key not in self.__dict__:
+                self.__dict__[key] = val
+                if key in base_strategy_kwargs:
+                    self.__dict__[key] = base_strategy_kwargs[key]
+
+        self.symbol = self.symbol.upper()
+        self.timeframe = self.timeframe.upper()
+        self.__mt5_timeframe, self.__update_delta = TIMEFRAMES[self.timeframe]
+        self.lots_per_trade = float(self.lots_per_trade)
+
+        # set debug mode if not specified in base_strategy_kwargs
+        if self.debug_mode is None:
+            self.debug_mode = debug_mode
+
+        # set up commands dict
+        self.__commands = {
+            'dump_data_q': self.dump_data_q
+        }
+
+        # use bad 8-byte hash on name of strat to get EA ID if not specified
+        if self.ea_id is None:
+            self.ea_id = int(hashlib.blake2b(bytes(self.__name, encoding='utf-8'), digest_size=8).hexdigest(), base=16)
+
+        # login and initialize connection to mt5 terminal
         if not mt5.initialize(login=self.mt5_login_info['login_id'], password=self.mt5_login_info['password'],
                               server=self.mt5_login_info['trade_server']):
-            logger.error(f'Failed to initialize MT5 terminal for {self.name} strategy, error:\n{mt5.last_error()}\n')
+            logger.error(f'Failed to initialize MT5 terminal for {self.__name} strategy, error:\n{mt5.last_error()}\n')
             return False
         else:
-            self.mt5_terminal_info = mt5.terminal_info()
-            self.mt5_account_info = mt5.account_info()
-            print(f'Successfully initialized MT5 terminal for {self.name} strategy'
-                  f'\nMT5 terminal info: {self.mt5_terminal_info}\nMT5 account info: {self.mt5_account_info}')
+            self.__mt5_terminal_info = mt5.terminal_info()
+            if self.__mt5_terminal_info is None:
+                logger.error(f'Call to mt5.terminal_info() returned None, error:\n{mt5.last_error()}')
+                return False
+            self.__mt5_account_info = mt5.account_info()
+            if self.__mt5_account_info is None:
+                logger.error(f'Call to mt5.account_info() returned None, error:\n{mt5.last_error()}')
+                return False
+            print(f'Successfully initialized MT5 terminal for {self.__name} strategy'
+                  f'\nMT5 terminal info: {self.__mt5_terminal_info}\nMT5 account info: {self.__mt5_account_info}')
 
+        # load in trades from disk if strategy had been previously shutdown w/ open ones
+        self.__trades_filepath = util.get_live_trade_files_dir() / f'{self.__name}_{self.ea_id}_trades.pickle'
+        if self.__trades_filepath.is_file():
+            with open(self.__trades_filepath, 'rb') as trades_fp:
+                self.__trades = pickle.load(trades_fp)
+
+            closed_trades = []
+            for order_ticket in self.__trades:
+                positions_info = mt5.positions_get(ticket=order_ticket)
+                if positions_info is None:
+                    logger.error(f'Call to mt5.positions_get(ticket={order_ticket}) '
+                                 f'returned None, error:\n{mt5.last_error()}')
+                    return False
+                if len(positions_info) == 0:
+                    closed_trades.append(order_ticket)
+            for order_ticket in closed_trades:
+                del self.__trades[order_ticket]
+
+        if len(self.__trades) > 0:
+            print(f'{self.__name} strategy loaded in {len(self.__trades)} active trades\nTrades: {self.__trades}')
+
+        # get info about currency pair
+        if self.symbol is not None:
+            symbol_info = mt5.symbol_info(self.symbol)
+            if symbol_info is None:
+                logger.error(f'Call to mt5.symbol_info({self.symbol}) returned None, error:\n{mt5.last_error()}')
+                return False
+            self.__pip_resolution = 10 ** -(symbol_info.digits - 1)
+            if self.lots_per_trade is None:
+                self.lots_per_trade = symbol_info.volume_step
+            self.__pip_value = symbol_info.trade_contract_size * self.lots_per_trade * self.__pip_resolution
+
+        # check if market is closed if specified to, and sleep if so
         market_closed = False
         if self.check_if_market_is_closed:
             market_closed = self.is_market_closed()
-
         if market_closed:
             self.sleep_till_market_open()
 
-        self.utc_offset = self.get_server_utc_offset()
+        # get utc offset of mt5 terminal once market is open if it isn't already
+        if self.detect_utc_offset:
+            self.utc_offset = self.get_server_utc_offset()
         if self.utc_offset is None:
+            logger.error('UTC offset is not None')
             return False
 
-        if self.symbol is not None and self.lots_per_trade is None:
-            symbol_info = mt5.symbol_info(self.symbol)
-            self.lots_per_trade = symbol_info.volume_step
-
-        self.mt5_initialized()
+        self.strategy_process_setup()
 
         return True
+
+    def calculate_profit(self, close_price, open_price, in_quote_currency):
+        return research.get_profit(close_price, open_price, self.__pip_value, self.__pip_resolution, in_quote_currency)
 
     def sleep_till_market_open(self):
         # markets should be open by 10:00PM GMT Sunday
@@ -251,21 +357,22 @@ class TradeStrategy:
 
         time_now = datetime.now(tz=timezone.utc)
         sleep_time = (open_dt - time_now).total_seconds()
-        print(f'Sleeping {self.name} strategy until {self.symbol} market is open on Sunday at 10:00 PM GMT '
+        print(f'Sleeping {self.__name} strategy until {self.symbol} market is open on Sunday at 10:00 PM GMT '
               f'in {sleep_time / 60 / 60} hours, goodnight')
-        self.exit_event.wait(sleep_time)
+        self.__exit_event.wait(sleep_time)
 
-        while True and not self.exit_event.is_set():
+        while True and not self.__exit_event.is_set():
             if not self.is_market_closed():
                 break
-            self.exit_event.wait(60 * 60)
+            self.__exit_event.wait(60 * 60)
             print(f'{self.symbol} market appears to still be closed at {datetime.now(tz=timezone.utc)},'
-                  f' sleeping {self.name} strategy for another hour')
+                  f' sleeping {self.__name} strategy for another hour')
 
     def get_server_utc_offset(self):
         latest_bar = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, 1)
         if latest_bar is None:
-            logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
+            logger.error(f'Call to mt5.copy_rates_from_pos({self.symbol, mt5.TIMEFRAME_H1, 0, 1}) '
+                         f'returned None, error:\n{mt5.last_error()}')
             return
         latest_bar = latest_bar[0]
 
@@ -281,182 +388,271 @@ class TradeStrategy:
                                        hour=current_utc_dt.hour, tzinfo=timezone.utc)
 
         hour_offset = round((server_current_hour_bar_dt - current_utc_hour_dt).total_seconds() / (60 * 60))
-
-        #######yo
-        hour_offset = 2
         return hour_offset
 
     def get_next_update_delta(self, latest_bar_timestamp):
         next_bar_dt = (datetime.fromtimestamp(latest_bar_timestamp, tz=timezone.utc)
-                       - timedelta(hours=self.utc_offset) + timedelta(seconds=self.update_delta))
+                       - timedelta(hours=self.utc_offset) + timedelta(seconds=self.__update_delta))
         update_delta = (next_bar_dt - datetime.now(tz=timezone.utc)).total_seconds()
         return update_delta
 
+    def debug_wait(self, seconds):
+        start_time = time.time()
+        time_left = seconds
+        time_elapsed = 0
+
+        while not self.__debug_exit_event.is_set():
+            self.__debug_exit_event.wait(time_left)
+
+            # if there is a command sent from parent TradeBot proc call command, otherwise jsut exit
+            if self.__proc_conn.poll():
+                self.__debug_exit_event.clear()  # reset event flag
+
+                cmd, args = self.__proc_conn.recv()
+                func = self.__commands[cmd]
+
+                try:
+                    func(*args)
+                except Exception as e:
+                    logger.error(f'Failed to call "{cmd}" with args {args} on {self.__name} strategy, exception: {e}')
+
+                time_elapsed += time.time() - start_time
+                time_left = seconds - time_elapsed
+                start_time = time.time()
+
     def run(self):
-        if self.exit_event.is_set():
+        if self.__exit_event.is_set():
             return True
 
-        first_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, self.bar_buffer_size + 1)
+        first_bars = mt5.copy_rates_from_pos(self.symbol, self.__mt5_timeframe, 0, self.bar_buffer_size + 1)
         if first_bars is None:
-            logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
+            logger.error(f'Call to mt5.copy_rates_from_pos('
+                         f'{self.symbol, self.__mt5_timeframe, 0, self.bar_buffer_size + 1}) '
+                         f'returned None, error:\n{mt5.last_error()}')
             return False
 
-        self.lfg = live_trading.LiveFeatureGenerator(indicators=self.indicators, features=self.features,
-                                                     utc_offset=self.utc_offset, custom_settings=self.custom_settings)
-
+        self.__lfg = live_trading.LiveFeatureGenerator(indicators=self.indicators, features=self.features,
+                                                       utc_offset=self.utc_offset,
+                                                       custom_settings=self.custom_feature_settings)
         first_completed_bars = first_bars[:-1]
-        if not self.lfg.process_first_bars(first_completed_bars):
+        if not self.__lfg.process_first_bars(first_completed_bars):
             logger.error(f'Live feature generator unable to process first bars')
             return False
-        self.process_first_bars(self.lfg.data_q, self.lfg.feature_indices, self.lfg.all_features_filled_idx)
+        self.process_first_bars(self.__lfg.data_q, self.__lfg.feature_indices, self.__lfg.all_features_filled_idx)
 
-        if self.exit_event.is_set():
+        if self.__exit_event.is_set():
             return True
 
         if self.process_immediately:
-            print(f'Immediate start: {self.name} strategy starting to process {self.symbol} '
+            print(f'Immediate start: {self.__name} strategy starting to process {self.symbol} '
                   f'{self.timeframe} price bars')
-            self.process_new_data(self.lfg.data_q, self.lfg.feature_indices, True)
+            self.process_new_data(self.__lfg.data_q, self.__lfg.feature_indices, True)
 
         next_update_delta = self.get_next_update_delta(first_bars[-1][0])
         if next_update_delta > 0:
-            if not self.process_immediately:
-                print(f'{self.name} strategy will begin processing {self.symbol} {self.timeframe} price bars in '
-                      f'{next_update_delta} seconds')
-            self.exit_event.wait(next_update_delta)
+            print(f'{self.__name} strategy will begin processing {self.symbol} {self.timeframe} price bars'
+                  f' {"again " if self.process_immediately else ""}in {next_update_delta / 60} minutes')
+            if self.debug_mode:
+                self.debug_wait(next_update_delta)
+            else:
+                self.__exit_event.wait(next_update_delta)
         else:
             if not self.process_immediately:
-                print(f'{self.name} strategy has begun processing {self.symbol} {self.timeframe} price bars')
+                print(f'{self.__name} strategy has begun processing {self.symbol} {self.timeframe} price bars')
 
-        self.last_completed_bar_timestamp = first_bars[-2][0]
-        while not self.exit_event.is_set():
-            latest_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, 2)
+        self.__last_completed_bar_timestamp = first_bars[-2][0]
+        while not self.__exit_event.is_set():
+            latest_bars = mt5.copy_rates_from_pos(self.symbol, self.__mt5_timeframe, 0, 2)
             if latest_bars is None:
-                logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
+                logger.error(f'Call to mt5.copy_rates_from_pos({self.symbol, self.__mt5_timeframe, 0, 2})'
+                             f' returned None, error:\n{mt5.last_error()}')
                 return False
 
             retries = 0
-            while latest_bars[-2][0] == self.last_completed_bar_timestamp and retries < 120:
-                self.exit_event.wait(0.5)
-                latest_bars = mt5.copy_rates_from_pos(self.symbol, self.mt5_timeframe, 0, 2)
+            while latest_bars[-2][0] == self.__last_completed_bar_timestamp and retries < 120:
+                self.__exit_event.wait(0.2)
+                latest_bars = mt5.copy_rates_from_pos(self.symbol, self.__mt5_timeframe, 0, 2)
                 if latest_bars is None:
-                    logger.error(f'Nothing returned by copy_rates_from_pos(), mt5 error:\n{mt5.last_error()}')
+                    logger.error(f'Call to mt5.copy_rates_from_pos({self.symbol, self.__mt5_timeframe, 0, 2})'
+                                 f' returned None, error:\n{mt5.last_error()}')
                     return False
                 retries += 1
 
-            if latest_bars[-2][0] == self.last_completed_bar_timestamp:
+            if latest_bars[-2][0] == self.__last_completed_bar_timestamp:
                 market_closed = self.is_market_closed()
                 if market_closed:
                     self.sleep_till_market_open()
                     continue
 
-            if not self.lfg.process_new_bar(latest_bars[-2]):
+            if not self.__lfg.process_new_bar(latest_bars[-2]):
                 logger.error(f'Live feature generator unable to process new bar:\n{latest_bars[-2]}')
                 return False
-            self.process_new_data(self.lfg.data_q, self.lfg.feature_indices, False)
+            self.process_new_data(self.__lfg.data_q, self.__lfg.feature_indices, False)
 
             next_update_delta = self.get_next_update_delta(latest_bars[-1][0])
             if next_update_delta > 0:
-                self.exit_event.wait(next_update_delta)
+                if self.debug_mode:
+                    logger.debug(f'{self.__name} strategy will begin processing {self.symbol} {self.timeframe} '
+                                 f'price bars again in {next_update_delta / 60} minutes')
+                    self.debug_wait(next_update_delta)
+                else:
+                    self.__exit_event.wait(next_update_delta)
 
-            self.last_completed_bar_timestamp = latest_bars[-2][0]
+            self.__last_completed_bar_timestamp = latest_bars[-2][0]
         return True
 
+    # returns False by default if error with MetaTrader5 package
     def is_market_closed(self):
         print(f'Checking if {self.symbol} market is open...')
-        last_timestamp = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)[0][0]
+        last_m1_bar = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)
+        if last_m1_bar is None:
+            logger.error(f'Call to mt5.copy_rates_from_pos({self.symbol, mt5.TIMEFRAME_M1, 0, 1})'
+                         f' returned None, error:\n{mt5.last_error()}')
+            return False
         for _ in range(2):
-            self.exit_event.wait(70)
-            timestamp = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)[0][0]
-            if timestamp != last_timestamp:
+            self.__exit_event.wait(70)
+            latest_m1_bar = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M1, 0, 1)
+            if last_m1_bar is None:
+                logger.error(f'Call to mt5.copy_rates_from_pos({self.symbol, mt5.TIMEFRAME_M1, 0, 1})'
+                             f' returned None, error:\n{mt5.last_error()}')
+                return False
+            if last_m1_bar[0][0] != latest_m1_bar[0][0]:
                 print(f'{self.symbol} market does not seem to be closed')
                 return False
-            last_timestamp = timestamp
+            last_m1_bar = latest_m1_bar
         print(f'{self.symbol} market seems to be closed')
         return True
 
     def get_reordered_feature_row(self, row, features):
-        row = [row[self.lfg.feature_indices[feat_name]] for feat_name in features]
+        row = [row[self.__lfg.feature_indices[feat_name]] for feat_name in features]
         return row
 
-    def open_trade(self, trade_type_int, additional_dict=None):
-        if len(self.trades) < self.max_concurrent_trades:
+    def open_trade(self, trade_type_int, custom_trade_req=None, additional_dict=None, log_msg=None):
+        if len(self.__trades) < self.max_concurrent_trades:
             symbol_info_tick = mt5.symbol_info_tick(self.symbol)
+            if symbol_info_tick is None:
+                logger.error(f'Call to mt5.symbol_info_tick({self.symbol}) returned None, error:\n{mt5.last_error()}')
+                return False
+
             open_price = symbol_info_tick.ask if trade_type_int == 1 else symbol_info_tick.bid
             mt5_order_type = mt5.ORDER_TYPE_BUY if trade_type_int == 1 else mt5.ORDER_TYPE_SELL
 
             trade_req = {
                 'action': mt5.TRADE_ACTION_DEAL,
                 'symbol': self.symbol,
-                'volume': self.lots,
+                'volume': self.lots_per_trade,
                 'type': mt5_order_type,
                 'type_filling': mt5.ORDER_FILLING_FOK,
                 'type_time': mt5.ORDER_TIME_GTC,
                 'price': open_price,
-                'deviation': 5,
+                'deviation': 10,
                 'magic': self.ea_id,
-                'comment': f'ForexMachine trade open from {self.name} strategy'
+                'comment': 'ForexMachine trade open'  # there is a length limit for comments
             }
+
+            # args sent to call_mt5_func() will not work if the arg is a dictionary
             trade_resp = mt5.order_send(trade_req)
+            if trade_resp is None:
+                logger.error(f'Call to mt5.order_send({trade_req}) returned None, error:\n{mt5.last_error()}')
+                return False
+
+            if custom_trade_req is not None:
+                trade_req.update(custom_trade_req)
 
             if trade_resp.retcode == mt5.TRADE_RETCODE_DONE or trade_resp.retcode == mt5.TRADE_RETCODE_DONE \
                     or trade_resp.retcode == mt5.TRADE_RETCODE_DONE_PARTIAL:
                 # 'mt5_open_timestamp' not accounting for the UTC offset of mt5 terminal (usually 2 hours)
-                self.trades[trade_resp.order] = {
+                # also unable to pickle named tuples (trade_resp) because its a class attribute so convert it to dict,
+                # explanation: https://stackoverflow.com/a/4678982/10276720
+                trade_resp_dict = trade_resp._asdict()
+                trade_resp_dict['request'] = trade_resp_dict['request']._asdict()
+                self.__trades[trade_resp.order] = {
                     'trade_request': trade_req,
-                    'trade_response': trade_resp,
+                    'trade_response': trade_resp_dict,
                     'look_to_close': False,
-                    'mt5_open_timestamp': symbol_info_tick.time
+                    'mt5_open_timestamp': symbol_info_tick.time,
+                    'log_msg': log_msg
                 }
                 if additional_dict is not None:
-                    self.trades[trade_resp.order].update(additional_dict)
-                print(f'{self.name} STRATEGY SUCCESSFULLY PLACED {self.trade_decision_strings[trade_type_int]} ORDER, '
-                      f'RETCODE: {trade_resp.retcode}, COMMENT: {trade_resp.comment}')
+                    self.__trades[trade_resp.order].update(additional_dict)
+                print(f'{self.__name} STRATEGY SUCCESSFULLY PLACED {TRADE_DECISION_STRINGS[trade_type_int]} ORDER,'
+                      f' RETCODE: {trade_resp.retcode}, COMMENT: {trade_resp.comment}')
                 return True
             else:
-                print(f'{self.name} STRATEGY FAILED TO PLACE {self.trade_decision_strings[trade_type_int]} ORDER, '
+                print(f'{self.__name} STRATEGY FAILED TO PLACE {TRADE_DECISION_STRINGS[trade_type_int]} ORDER, '
                       f'RETCODE: {trade_resp.retcode}, COMMENT: {trade_resp.comment}')
         return False
 
     def close_trade(self, order_ticket):
-        trade_dict = self.trades[order_ticket]
-        trade_type_int = 1 if trade_dict['trade_request']['type'] == mt5.ORDER_TYPE_BUY else 0
         symbol_info_tick = mt5.symbol_info_tick(self.symbol)
+        if symbol_info_tick is None:
+            logger.error(f'Call to mt5.symbol_info_tick({self.symbol}) returned None, error:\n{mt5.last_error()}')
+            return False
+
+        positions_info = mt5.positions_get(ticket=order_ticket)
+        if positions_info is None:
+            logger.error(f'Call to mt5.positions_get(ticket={order_ticket}) returned None, error:\n{mt5.last_error()}')
+            return False
+        if len(positions_info) == 0:
+            logger.error(f'No trade was found with order ticket number: {order_ticket}, recommend '
+                         f'closing trade manually if it\'s believed to still be open')
+            del self.__trades[order_ticket]
+            return False
+
+        trade_dict = self.__trades[order_ticket]
+        trade_type_int = 1 if trade_dict['trade_request']['type'] == mt5.ORDER_TYPE_BUY else 0
         close_price = symbol_info_tick.bid if trade_type_int == 1 else symbol_info_tick.ask
         mt5_order_type = mt5.ORDER_TYPE_SELL if trade_type_int == 1 else mt5.ORDER_TYPE_BUY
 
         trade_req = {
             'action': mt5.TRADE_ACTION_DEAL,
             'symbol': self.symbol,
-            'volume': trade_dict['trade_response'].volume,
+            'position': order_ticket,
+            'volume': trade_dict['trade_response']['volume'],
             'type': mt5_order_type,
             'type_filling': mt5.ORDER_FILLING_FOK,
             'type_time': mt5.ORDER_TIME_GTC,
             'price': close_price,
             'deviation': 10,
             'magic': self.ea_id,
-            'comment': f'ForexMachine trade close from {self.name} strategy'
+            'comment': 'ForexMachine trade close'
         }
-        trade_resp = mt5.order_send(trade_req)
 
-        position_info = mt5.positions_get(ticket=order_ticket)
+        # args sent to call_mt5_func() will not work if the arg is a dictionary
+        trade_resp = mt5.order_send(trade_req)
+        if trade_resp is None:
+            logger.error(f'Call to mt5.order_send({trade_req}) returned None, error:\n{mt5.last_error()}')
+            return False
+
         if trade_resp.retcode == mt5.TRADE_RETCODE_DONE or trade_resp.retcode == mt5.TRADE_RETCODE_DONE:
-            print(f'{self.name} STRATEGY SUCCESSFULLY ClOSED {self.trade_decision_strings[trade_type_int]} ORDER, '
-                  f'PROFIT: {position_info.profit}, MT5 OPEN TIMESTAMP: {trade_dict["mt5_open_timestamp"]}, '
+            print(f'{self.__name} STRATEGY SUCCESSFULLY ClOSED {TRADE_DECISION_STRINGS[trade_type_int]} ORDER, '
+                  f'PROFIT: {positions_info[0].profit}, MT5 OPEN TIMESTAMP: {trade_dict["mt5_open_timestamp"]}, '
                   f'RETCODE: {trade_resp.retcode}, COMMENT: {trade_resp.comment}')
-            del self.trades[order_ticket]
+            del self.__trades[order_ticket]
             return True
         else:
-            print(f'{self.name} STRATEGY FAILED TO CLOSE {self.trade_decision_strings[trade_type_int]} ORDER, '
-                  f'PROFIT: {position_info.profit}, MT5 OPEN TIMESTAMP: {trade_dict["mt5_open_timestamp"]}, '
+            print(f'{self.__name} STRATEGY FAILED TO CLOSE {TRADE_DECISION_STRINGS[trade_type_int]} ORDER, '
+                  f'PROFIT: {positions_info[0].profit}, MT5 OPEN TIMESTAMP: {trade_dict["mt5_open_timestamp"]}, '
                   f'RETCODE: {trade_resp.retcode}, COMMENT: {trade_resp.comment}\nRECOMMEND CLOSING MANUALLY')
         return False
 
     def finish_up(self):
+        closed_trades = []
+        for order_ticket in self.__trades:
+            positions_info = mt5.positions_get(ticket=order_ticket)
+            if positions_info is None:
+                logger.error(f'Call to mt5.positions_get(ticket={order_ticket}) '
+                             f'returned None, error:\n{mt5.last_error()}')
+                break
+            if len(positions_info) == 0:
+                closed_trades.append(order_ticket)
+        for order_ticket in closed_trades:
+            del self.__trades[order_ticket]
         mt5.shutdown()
         return True
 
-    def mt5_initialized(self):
+    # when strategy process is set up and running and MT5 connection is ready
+    def strategy_process_setup(self):
         pass
 
     def process_first_bars(self, data_q, feature_indices, all_features_filled_idx):
@@ -465,17 +661,24 @@ class TradeStrategy:
     def process_new_data(self, data_q, feature_indices, processing_immediately):
         pass
 
+    def __del__(self):
+        if self.__trades_filepath is not None:
+            if len(self.__trades) > 0:
+                with open(self.__trades_filepath, 'wb') as trades_fp:
+                    pickle.dump(self.__trades, trades_fp)
+            elif self.__trades_filepath.is_file():
+                os.remove(self.__trades_filepath)
+
 
 class IchiCloudStrategy(TradeStrategy):
-    name = f'ichi-cloud'
+    default_name = f'ichi-cloud'
 
     def __init__(self, symbol='EURUSD', timeframe='H1', fast_ma_window=7, lots_per_trade=0.2, lstm_seq_len=128,
                  ichi_settings=(9, 30, 60), profit_noise_percent=0.0012, fast_ma_model_path=None, xgb_model_path=None,
                  fast_ma_diff_threshold=0.01, decision_prob_diff_thresh=0.5, bar_buffer_size=300, model_files_path=None,
                  train_data_start_iso=research.TRAIN_DATA_START_ISO, train_data_end_iso=research.TRAIN_DATA_END_ISO,
                  ma_cols=None, pc_cols=None, normalization_groups=None, open_trade_sigs=None, tf_force_cpu=False,
-                 models_features_names=None, max_concurrent_trades=np.inf, process_immediately=False,
-                 profit_in_quote_currency=True, pip_resolution=None, check_if_market_is_closed=False):
+                 models_features_names=None, max_concurrent_trades=np.inf, profit_in_quote_currency=True):
         self.symbol = symbol.upper()
         self.timeframe = timeframe.upper()
         self.lots_per_trade = lots_per_trade
@@ -495,22 +698,22 @@ class IchiCloudStrategy(TradeStrategy):
         self.pc_cols = pc_cols
         self.models_features_names = models_features_names
         self.max_concurrent_trades = max_concurrent_trades
-        self.process_immediately = process_immediately
         self.profit_in_quote_currency = profit_in_quote_currency  # if false, consider profit in base currency
-        self.pip_resolution = pip_resolution
-        self.check_if_market_is_closed = check_if_market_is_closed
         self.tf_force_cpu = tf_force_cpu
+        self.train_data_start_iso = train_data_start_iso
+        self.train_data_end_iso = train_data_end_iso
         self.ma_cols_idx_set = None
         self.pc_cols_idx_set = None
         self.profit_noise = None
-        self.pip_value = None
+        self.norm_terms = None
+        self.strat_name = None
         self.indicators = ['ichimoku']
         self.features = ['ichimoku_signals']
         self.xgb_model_perc_chngs_q = deque()
         self.fast_ma_model_preds_q = deque()
         self.fast_ma_model_rows_q = deque()
         self.fast_ma_model_seq_q = deque()
-        self.custom_settings = {
+        self.custom_feature_settings = {
             'ichimoku': {
                 'tenkan_period': self.tenkan_period,
                 'kijun_period': self.kijun_period,
@@ -569,15 +772,13 @@ class IchiCloudStrategy(TradeStrategy):
         self.xgb_decision_predictor = xgb.Booster()
         self.xgb_decision_predictor.load_model(self.xgb_model_path)
 
-        self.norm_terms = self.get_normalization_terms(train_data_start_iso, train_data_end_iso)
-
     def get_normalization_terms(self, train_data_start_iso, train_data_end_iso):
-        norm_terms_filepath = self.model_files_path / f'{self.name}_normalization_terms.pickle'
+        norm_terms_filepath = self.model_files_path / f'{self.strat_name}_normalization_terms.pickle'
 
         if norm_terms_filepath.is_file():
             with open(norm_terms_filepath, 'rb') as ntfp:
                 norm_terms = pickle.load(ntfp)
-            print(f'loaded normalization terms for strategy with name "{self.name}" from {norm_terms_filepath}')
+            print(f'loaded normalization terms for strategy with name "{self.strat_name}" from {norm_terms_filepath}')
         else:
             indicators_info = {
                 'ichimoku': {
@@ -588,7 +789,7 @@ class IchiCloudStrategy(TradeStrategy):
                 }
             }
             tick_data_filepath = research.download_mt5_data(self.symbol, self.timeframe, train_data_start_iso,
-                                                            train_data_end_iso)
+                                                            train_data_end_iso, mt5_initialized=True)
             data_with_indicators = research.add_indicators_to_raw(filepath=tick_data_filepath,
                                                                   indicators_info=indicators_info,
                                                                   datetime_col='datetime')
@@ -608,17 +809,19 @@ class IchiCloudStrategy(TradeStrategy):
 
             with open(norm_terms_filepath, 'wb') as ntfp:
                 pickle.dump(norm_terms, ntfp)
-            print(f'generated normalization terms for strategy with name "{self.name}" from {train_data_start_iso} to '
-                  f'{train_data_end_iso} and saved pickle file to {norm_terms_filepath}')
+            print(f'generated normalization terms for strategy with name "{self.strat_name}" from '
+                  f'{train_data_start_iso} to {train_data_end_iso} and saved pickle file to {norm_terms_filepath}')
 
         return norm_terms
 
-    def mt5_initialized(self):
-        symbol_info = mt5.symbol_info('EURUSD')
+    def strategy_process_setup(self):
+        symbol_info = mt5.symbol_info(self.symbol)
+        if symbol_info is None:
+            logger.error(f'Call to mt5.symbol_info({self.symbol}) returned None, error:\n{mt5.last_error()}')
         self.profit_noise = self.profit_noise_percent * self.lots_per_trade * symbol_info.trade_contract_size
-        if self.pip_resolution is None:
-            self.pip_resolution = 10 ** -(symbol_info.digits - 1)
-        self.pip_value = symbol_info.trade_contract_size * self.lots_per_trade * self.pip_resolution
+
+        self.strat_name = self.get_strat_name()
+        self.norm_terms = self.get_normalization_terms(self.train_data_start_iso, self.train_data_end_iso)
 
     def process_first_bars(self, data_q, feature_indices, all_features_filled_idx):
         if self.ma_cols_idx_set is None:
@@ -638,7 +841,7 @@ class IchiCloudStrategy(TradeStrategy):
                                                                     self.fast_ma_model_rows_q[-1],
                                                                     self.pc_cols_idx_set)
                 fast_ma_normalized_perc_chng = research.normalize_data_list(fast_ma_perc_chng, self.norm_terms,
-                                                                            self.lfg.feature_indices_keys)
+                                                                            self.get_lfg_feature_indices_keys())
                 fast_ma_normalized_perc_chng = self.get_reordered_feature_row(fast_ma_normalized_perc_chng,
                                                                               features=self.models_features_names)
                 self.fast_ma_model_seq_q.append(fast_ma_normalized_perc_chng)
@@ -652,6 +855,35 @@ class IchiCloudStrategy(TradeStrategy):
                     # implementation but whatever
                     if len(self.fast_ma_model_preds_q) > self.fast_ma_window:
                         self.fast_ma_model_preds_q.popleft()
+
+        trades = self.get_trades()
+        if len(trades) > 0:
+            symbol_info_tick = mt5.symbol_info_tick(self.symbol)
+            if symbol_info_tick is None:
+                logger.error(f'Call to mt5.symbol_info_tick({self.symbol}) returned None, error:\n{mt5.last_error()}')
+                return
+            for trade_order_ticket in trades:
+                trade_dict = trades[trade_order_ticket]
+                trade_type = 1 if trade_dict['trade_request']['type'] == mt5.ORDER_TYPE_BUY else 0
+                close_price = symbol_info_tick.ask if trade_type == 0 \
+                    else symbol_info_tick.bid
+                scaled_profit_noise = self.profit_noise if not self.profit_in_quote_currency \
+                    else self.profit_noise * close_price
+
+                profit = self.calculate_profit(close_price, trade_dict['trade_response']['price'],
+                                               in_quote_currency=self.profit_in_quote_currency)
+
+                if abs(profit) >= scaled_profit_noise:
+                    trade_dict['look_to_close'] = True
+
+                if trade_dict['look_to_close']:
+                    fast_ma_pred_diff = self.fast_ma_model_preds_q[-1] - self.fast_ma_model_preds_q[-2]
+                    if abs(fast_ma_pred_diff) >= self.fast_ma_diff_threshold:
+                        # (MA pct_change is decreasing on a long trade)
+                        # or (MA pct_change is increasing on a short trade)
+                        if (fast_ma_pred_diff < 0 and trade_type == 1) \
+                                or (fast_ma_pred_diff > 0 and trade_type == 0):
+                            self.close_trade(trade_dict['trade_response']['order'])
 
     def process_new_data(self, data_q, feature_indices, processing_immediately):
         # if processing_immediately is True then the most recent bars were already
@@ -667,7 +899,7 @@ class IchiCloudStrategy(TradeStrategy):
                                                                 self.fast_ma_model_rows_q[-1],
                                                                 self.pc_cols_idx_set)
             fast_ma_normalized_perc_chng = research.normalize_data_list(fast_ma_perc_chng, self.norm_terms,
-                                                                        self.lfg.feature_indices_keys)
+                                                                        self.get_lfg_feature_indices_keys())
             fast_ma_normalized_perc_chng = self.get_reordered_feature_row(fast_ma_normalized_perc_chng,
                                                                           features=self.models_features_names)
             self.fast_ma_model_seq_q.append(fast_ma_normalized_perc_chng)
@@ -679,18 +911,22 @@ class IchiCloudStrategy(TradeStrategy):
             if len(self.fast_ma_model_preds_q) > self.fast_ma_window:
                 self.fast_ma_model_preds_q.popleft()
 
-        if len(self.trades) > 0:
+        trades = self.get_trades()
+        if len(trades) > 0:
             symbol_info_tick = mt5.symbol_info_tick(self.symbol)
-            for trade_order_ticket in self.trades:
-                trade_dict = self.trades[trade_order_ticket]
+            if symbol_info_tick is None:
+                logger.error(f'Call to mt5.symbol_info_tick({self.symbol}) returned None, error:\n{mt5.last_error()}')
+                return
+            for trade_order_ticket in trades:
+                trade_dict = trades[trade_order_ticket]
                 trade_type = 1 if trade_dict['trade_request']['type'] == mt5.ORDER_TYPE_BUY else 0
                 close_price = symbol_info_tick.ask if trade_type == 0 \
                     else symbol_info_tick.bid
                 scaled_profit_noise = self.profit_noise if not self.profit_in_quote_currency \
                     else self.profit_noise * close_price
 
-                profit = research.get_profit(close_price, trade_dict['trade_response'].price, self.pip_value,
-                                             self.pip_resolution, in_quote_currency=self.profit_in_quote_currency)
+                profit = self.calculate_profit(close_price, trade_dict['trade_response']['price'],
+                                               in_quote_currency=self.profit_in_quote_currency)
 
                 if abs(profit) >= scaled_profit_noise:
                     trade_dict['look_to_close'] = True
@@ -702,16 +938,15 @@ class IchiCloudStrategy(TradeStrategy):
                         # or (MA pct_change is increasing on a short trade)
                         if (fast_ma_pred_diff < 0 and trade_type == 1) \
                                 or (fast_ma_pred_diff > 0 and trade_type == 0):
-                            self.close_trade(trade_dict['trade_response'].order)
+                            self.close_trade(trade_dict['trade_response']['order'])
 
-        open_trade = False
+        open_trade_causes = []
         for sig in self.open_trade_sigs:
             sig_i = feature_indices[sig]
             if data_q[-1][sig_i] != 0:
-                open_trade = True
-                break
+                open_trade_causes.append(sig)
 
-        if open_trade or 1:
+        if len(open_trade_causes) > 0:
             xgb_model_input_row = research.apply_perc_change_list(data_q[-2], data_q[-1], cols_set=self.pc_cols_idx_set)
             xgb_model_input_row = self.get_reordered_feature_row(xgb_model_input_row,
                                                                  features=self.models_features_names)
@@ -721,18 +956,22 @@ class IchiCloudStrategy(TradeStrategy):
             decision_label = round(decision_prob)
             decision_prob_diff = abs(decision_label - decision_prob)
 
-            print(f'{decision_prob}: decision_prob')
-            print(f'{decision_label}: decision_label')
-            print(f'{decision_prob_diff}: decision_prob_diff')
-            print(f'{self.decision_prob_diff_thresh}: self.decision_prob_diff_thresh')
             if decision_prob_diff <= self.decision_prob_diff_thresh:
-                self.open_trade(decision_label)
+                log_msg = f'{self.strat_name} strategy detected {open_trade_causes} ichimoku signals' \
+                          f'\nWill attempt to open a {TRADE_DECISION_STRINGS[decision_label]} trade based ' \
+                          f'on classifier probability of {decision_prob}'
+                print(log_msg)
+                self.open_trade(decision_label, log_msg=log_msg)
 
 
-def run_trade_strategy(strategy, strategy_kwargs, strat_name, proc_conn, mt5_login_info, exit_event):
+def run_trade_strategy(strategy, strategy_kwargs, base_strategy_kwargs, strat_name, proc_conn, exit_event,
+                       mt5_login_info, debug_mode, debug_exit_event):
     strategy = strategy(**strategy_kwargs)
 
-    if not strategy.setup_trade_strategy_process(strat_name, proc_conn, mt5_login_info, exit_event):
+    if not strategy.setup_trade_strategy_process(strat_name=strat_name, proc_conn=proc_conn, exit_event=exit_event,
+                                                 mt5_login_info=mt5_login_info,
+                                                 base_strategy_kwargs=base_strategy_kwargs,
+                                                 debug_mode=debug_mode, debug_exit_event=debug_exit_event):
         return False
 
     if hasattr(strategy, 'tf_force_cpu') and strategy.tf_force_cpu:
@@ -766,8 +1005,78 @@ def enable_mt5_auto_trading_func(mt5_terminal_path):
 
 
 if __name__ == '__main__':
-    # mt5.initialize()
+    # mt5.initialize(login=38050173, password='kmmiv4ud', server='MetaQuotes-Demo')
     #
+    # symbol = "EURUSD"
+    #
+    # symbol_tick_info = mt5.symbol_info_tick(symbol)
+    # trade_req = {
+    #     'action': mt5.TRADE_ACTION_DEAL,
+    #     'symbol': symbol,
+    #     'volume': float(0.01),
+    #     'type': mt5.ORDER_TYPE_SELL,
+    #     'type_filling': mt5.ORDER_FILLING_FOK,
+    #     'type_time': mt5.ORDER_TIME_GTC,
+    #     'price': symbol_tick_info.bid,
+    #     'deviation': 5,
+    #     'magic': 123456,
+    #     'comment': f'auto trade test trade open'
+    # }
+    # trade_resp = mt5.order_send(trade_req)
+    # print(type(trade_resp))
+    # print(mt5.last_error())
+    # print(trade_resp)
+    #
+    # positions_info = mt5.positions_get(ticket=trade_resp.order)
+    # print(positions_info)
+    # print(positions_info[0].profit)
+    #
+    # symbol_tick_info = mt5.symbol_info_tick(symbol)
+    # trade_req = {
+    #     'action': mt5.TRADE_ACTION_DEAL,
+    #     'symbol': symbol,
+    #     'position': trade_resp.order,
+    #     'volume': float(0.01),
+    #     'type': mt5.ORDER_TYPE_BUY,
+    #     'type_filling': mt5.ORDER_FILLING_FOK,
+    #     'type_time': mt5.ORDER_TIME_GTC,
+    #     'price': symbol_tick_info.ask,
+    #     'deviation': 5,
+    #     'magic': 123456,
+    #     'comment': f'auto trade test trade close'
+    # }
+    # trade_resp = mt5.order_send(trade_req)
+    # print(type(trade_resp))
+    # print(mt5.last_error())
+    # print(trade_resp)
+    #
+    # positions_info = mt5.positions_get(ticket=trade_resp.order)
+    # print(positions_info)
+    # print(positions_info[0].profit)
+    #
+    # quit()
+
+    # date_from = datetime(2021,1,8)
+    # date_to = datetime(2021,1,24)
+    # orders = mt5.history_orders_get(date_from,date_to)
+    # print(orders)
+    # print(len(orders))
+    #
+    # print(mt5.positions_get(ticket=9790141))
+    # print(mt5.last_error())
+    # print(mt5.orders_get(ticket=9790141))
+    # print(mt5.last_error())
+    #
+    # print(mt5.positions_get(ticket=9789032))
+    # print(mt5.last_error())
+    # print(mt5.orders_get(ticket=9789032))
+    # print(mt5.last_error())
+    #
+    # print(mt5.positions_get(ticket=12312312))
+    # print(mt5.last_error())
+    # print(mt5.orders_get(ticket=12312312))
+    # print(mt5.last_error())
+
     # ts = mt5.copy_rates_from_pos('EURUSD', mt5.TIMEFRAME_M1, 0, 300)[0][0]
     #
     # print('yo 2', (datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -814,23 +1123,28 @@ if __name__ == '__main__':
     #
     # mt5.shutdown()
 
-    tb = TradeBot()
+    tb = TradeBot(debug_mode=True)
 
     if not tb.init_mt5(enable_mt5_auto_trading=True):
         quit()
 
-    strategy_kwargs = {
-        'timeframe': 'h1',
-        'process_immediately': True,
-        'check_if_market_is_closed': False,
+    ichi_strategy_kwargs = {
         'tf_force_cpu': True,
-        'bar_buffer_size': 1440
     }
 
-    name1 = tb.run_strategy(IchiCloudStrategy, strategy_kwargs=strategy_kwargs, name_suffix='1')
+    base_strategy_kwargs = {
+        'process_immediately': True,
+        'check_if_market_is_closed': False,
+    }
+
+    name1 = tb.run_strategy(IchiCloudStrategy, strategy_kwargs=ichi_strategy_kwargs,
+                            base_strategy_kwargs=base_strategy_kwargs)
     # name2 = tb.run_strategy(IchiCloudStrategy, strategy_kwargs=strategy_kwargs, name_suffix='2')
 
-    time.sleep(185)
+    time.sleep(30)
+    tb.send_command(name1, 'dump_data_q')
+
+    time.sleep(60)
 
     tb.stop_strategy(name1)
     # tb.stop_strategy(name2)
