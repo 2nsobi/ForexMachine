@@ -868,13 +868,14 @@ class IchiCloudStrategy(TradeStrategy):
                         self.fast_ma_model_preds_q.popleft()
 
         trades = self.get_trades()
+        trades_to_close = []
         if len(trades) > 0:
             symbol_info_tick = mt5.symbol_info_tick(self.symbol)
             if symbol_info_tick is None:
                 logger.error(f'Call to mt5.symbol_info_tick({self.symbol}) returned None, error:\n{mt5.last_error()}')
                 return
-            for trade_order_ticket in trades:
-                trade_dict = trades[trade_order_ticket]
+            for order_ticket in trades:
+                trade_dict = trades[order_ticket]
                 trade_type = 1 if trade_dict['trade_request']['type'] == mt5.ORDER_TYPE_BUY else 0
                 close_price = symbol_info_tick.ask if trade_type == 0 \
                     else symbol_info_tick.bid
@@ -894,7 +895,10 @@ class IchiCloudStrategy(TradeStrategy):
                         # or (MA pct_change is increasing on a short trade)
                         if (fast_ma_pred_diff < 0 and trade_type == 1) \
                                 or (fast_ma_pred_diff > 0 and trade_type == 0):
-                            self.close_trade(trade_dict['trade_response']['order'])
+                            trades_to_close.append(trade_dict['trade_response']['order'])
+
+        for order_ticket in trades_to_close:
+            self.close_trade(order_ticket)
 
     def process_new_data(self, data_q, feature_indices, processing_immediately):
         # if processing_immediately is True then the most recent bars were already
@@ -923,13 +927,14 @@ class IchiCloudStrategy(TradeStrategy):
                 self.fast_ma_model_preds_q.popleft()
 
         trades = self.get_trades()
+        trades_to_close = []
         if len(trades) > 0:
             symbol_info_tick = mt5.symbol_info_tick(self.symbol)
             if symbol_info_tick is None:
                 logger.error(f'Call to mt5.symbol_info_tick({self.symbol}) returned None, error:\n{mt5.last_error()}')
                 return
-            for trade_order_ticket in trades:
-                trade_dict = trades[trade_order_ticket]
+            for order_ticket in trades:
+                trade_dict = trades[order_ticket]
                 trade_type = 1 if trade_dict['trade_request']['type'] == mt5.ORDER_TYPE_BUY else 0
                 close_price = symbol_info_tick.ask if trade_type == 0 \
                     else symbol_info_tick.bid
@@ -949,7 +954,10 @@ class IchiCloudStrategy(TradeStrategy):
                         # or (MA pct_change is increasing on a short trade)
                         if (fast_ma_pred_diff < 0 and trade_type == 1) \
                                 or (fast_ma_pred_diff > 0 and trade_type == 0):
-                            self.close_trade(trade_dict['trade_response']['order'])
+                            trades_to_close.append(trade_dict['trade_response']['order'])
+
+        for order_ticket in trades_to_close:
+            self.close_trade(order_ticket)
 
         open_trade_causes = []
         for sig in self.open_trade_sigs:
