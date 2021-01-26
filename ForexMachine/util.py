@@ -1,15 +1,21 @@
 from pathlib import Path
 from typing import Optional
 import logging
-import linecache
-import inspect
-
 
 PACKAGE_ROOT_DIR = Path(__file__).parent.resolve()
 TICKS_DATA_DIR = PACKAGE_ROOT_DIR / './PackageData/TicksData'
 MODEL_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/ModelFiles'
 LIVE_TRADE_FILES_DIR = PACKAGE_ROOT_DIR / './PackageData/.LiveTradingFiles'
 TEMP_DIR = PACKAGE_ROOT_DIR / './PackageData/.temp'
+
+LOGGER_LEVELS = {
+    'CRITICAL': 50,
+    'ERROR': 40,
+    'WARNING': 30,
+    'INFO': 20,
+    'DEBUG': 10,
+    'NOTSET': 0,
+}
 
 
 class Logger:
@@ -22,10 +28,13 @@ class Logger:
                                         '%(levelname)s: '
                                         '%(funcName)s(): '
                                         '%(lineno)d:\t'
-                                        '%(message)s')
-                                )
+                                        '%(message)s'))
             Logger.__logger_instance = logging.getLogger(__name__)
         return Logger.__logger_instance
+
+
+def set_root_logger_level(level):
+    logging.getLogger().setLevel(level=level)
 
 
 def create_folder(path):

@@ -11,7 +11,6 @@ import pickle
 import pandas as pd
 import xgboost as xgb
 import numpy as np
-import sys
 from pathlib import Path
 import configparser
 import subprocess
@@ -60,9 +59,11 @@ TRADE_DECISION_STRINGS = {1: 'buy', 0: 'sell'}
 
 class TradeBot:
     def __init__(self, debug_mode=False):
-        self.debug_mode = debug_mode
         self.strats = {}
         self.mt5_login_info = {}
+        self.debug_mode = debug_mode
+        if self.debug_mode:
+            logger.setLevel(level=util.LOGGER_LEVELS['DEBUG'])
 
     def init_mt5(self, forex_machine_config_path=None, enable_mt5_auto_trading=False):
         # set mt5 terminal config so that auto trading is enabled
@@ -145,8 +146,11 @@ class TradeBot:
         if name is None:
             name = strategy.default_name
         if name in self.strats:
-            logger.error(f'Strategy already running with name: {name}')
-            return
+            if self.strats[name]['process'].is_alive():
+                logger.error(f'Strategy already running with name: {name}')
+                return
+            else:
+                del self.strats[name]
 
         parent_conn, child_conn = mltp.Pipe(duplex=True)
         exit_event = mltp.Event()
@@ -168,17 +172,21 @@ class TradeBot:
     def send_command(self, strat_name, cmd, args=()):
         if not isinstance(args, tuple):
             logger.error(f'args must be a tuple: {args}')
+            return False
         self.strats[strat_name]['parent_connection'].send((cmd, args))
         self.strats[strat_name]['debug_exit_event'].set()
+        return True
 
     def stop_strategy(self, name):
         if name not in self.strats:
             logger.error(f'No strategy running with name: {name}')
+            return False
         self.strats[name]['exit_event'].set()
         self.strats[name]['debug_exit_event'].set()
         self.strats[name]['process'].join()
         del self.strats[name]
         print(f'Stopped strategy with name: {name}')
+        return True
 
 
 class TradeStrategy:
@@ -266,6 +274,9 @@ class TradeStrategy:
         # set debug mode if not specified in base_strategy_kwargs
         if self.debug_mode is None:
             self.debug_mode = debug_mode
+        if self.debug_mode:
+            logger.setLevel(level=util.LOGGER_LEVELS['DEBUG'])
+            logger.debug(f'{self.__name} strategy is in debug mode')
 
         # set up commands dict
         self.__commands = {
@@ -396,29 +407,29 @@ class TradeStrategy:
         update_delta = (next_bar_dt - datetime.now(tz=timezone.utc)).total_seconds()
         return update_delta
 
-    def debug_wait(self, seconds):
+    def debug_wait(self, duration):
         start_time = time.time()
-        time_left = seconds
         time_elapsed = 0
 
-        while not self.__debug_exit_event.is_set():
-            self.__debug_exit_event.wait(time_left)
+        while duration > time_elapsed:
+            self.__debug_exit_event.wait(duration-time_elapsed)
 
-            # if there is a command sent from parent TradeBot proc call command, otherwise jsut exit
+            # if there is a command sent from parent TradeBot proc call command
             if self.__proc_conn.poll():
                 self.__debug_exit_event.clear()  # reset event flag
 
-                cmd, args = self.__proc_conn.recv()
-                func = self.__commands[cmd]
-
                 try:
+                    cmd, args = self.__proc_conn.recv()
+                    func = self.__commands[cmd]
                     func(*args)
                 except Exception as e:
                     logger.error(f'Failed to call "{cmd}" with args {args} on {self.__name} strategy, exception: {e}')
 
                 time_elapsed += time.time() - start_time
-                time_left = seconds - time_elapsed
                 start_time = time.time()
+            # otherwise just exit
+            else:
+                break
 
     def run(self):
         if self.__exit_event.is_set():
