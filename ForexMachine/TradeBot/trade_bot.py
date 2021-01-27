@@ -65,9 +65,6 @@ class TradeBot:
         if self.debug_mode:
             logger.setLevel(level=util.LOGGER_LEVELS['DEBUG'])
 
-        # will create ModelFiles directory in ForexMachine package if it doesn't already exist
-        util.get_model_files_dir()
-
     def init_mt5(self, forex_machine_config_path=None, enable_mt5_auto_trading=False):
         # set mt5 terminal config so that auto trading is enabled
         mt5_terminal_path = None
@@ -145,6 +142,14 @@ class TradeBot:
 
         return True
 
+    def show_all_running_strats(self):
+        for strat_name in list(self.strats.keys()):
+            if self.strats[strat_name]['process'].is_alive():
+                print(f'{strat_name} strategy process dict:\n{self.strats[strat_name]}')
+            else:
+                logger.warning(f'Strategy with name {strat_name} seems to have crashed')
+                del self.strats[strat_name]
+
     def run_strategy(self, strategy, strategy_kwargs={}, base_strategy_kwargs={}, name=None):
         if name is None:
             name = strategy.default_name
@@ -153,6 +158,7 @@ class TradeBot:
                 logger.error(f'Strategy already running with name: {name}')
                 return
             else:
+                logger.warning(f'Strategy with name {name} seems to have crashed')
                 del self.strats[name]
 
         parent_conn, child_conn = mltp.Pipe(duplex=True)
@@ -173,6 +179,9 @@ class TradeBot:
         return name
 
     def send_command(self, strat_name, cmd, args=()):
+        if strat_name not in self.strats:
+            logger.error(f'No strategy running with name: {strat_name}')
+            return False
         if not isinstance(args, tuple):
             logger.error(f'args must be a tuple: {args}')
             return False
@@ -415,7 +424,7 @@ class TradeStrategy:
         time_elapsed = 0
 
         while duration > time_elapsed:
-            self.__debug_exit_event.wait(duration-time_elapsed)
+            self.__debug_exit_event.wait(duration - time_elapsed)
 
             # if there is a command sent from parent TradeBot proc call command
             if self.__proc_conn.poll():
@@ -906,7 +915,7 @@ class IchiCloudStrategy(TradeStrategy):
         for order_ticket in trades_to_close:
             self.close_trade(order_ticket)
 
-    def process_new_data(self, data_q, feature_indices, processing_immediately):
+    def process_new_data(self, data_q, feature_indices, processing_immediately=False):
         # if processing_immediately is True then the most recent bars were already
         # processed in self.process_first_bars() so no need to process most recent bar
         if not processing_immediately:

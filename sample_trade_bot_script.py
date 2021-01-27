@@ -13,4 +13,10 @@ ichi_strat_name = tb.run_strategy(IchiCloudStrategy, strategy_kwargs=ichi_strate
 # run for a month
 time.sleep(60*60*24*30)
 
+# save contents of the strategy's feature queue to a csv file
+tb.send_command(ichi_strat_name, 'dump_data_q', args=('./ichi-cloud_strategy_data_q.csv',))
+
+# run for another month
+time.sleep(60*60*24*30)
+
 tb.stop_strategy(ichi_strat_name)
