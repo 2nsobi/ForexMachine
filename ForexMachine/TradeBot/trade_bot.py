@@ -65,6 +65,9 @@ class TradeBot:
         if self.debug_mode:
             logger.setLevel(level=util.LOGGER_LEVELS['DEBUG'])
 
+        # will create ModelFiles directory in ForexMachine package if it doesn't already exist
+        util.get_model_files_dir()
+
     def init_mt5(self, forex_machine_config_path=None, enable_mt5_auto_trading=False):
         # set mt5 terminal config so that auto trading is enabled
         mt5_terminal_path = None
