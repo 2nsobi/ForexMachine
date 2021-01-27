@@ -44,21 +44,21 @@ def create_folder(path):
     return path.resolve()
 
 
+def create_public_package_folders():
+    get_model_files_dir()
+
+
 def get_ticks_data_dir():
-    create_folder(TICKS_DATA_DIR)
-    return TICKS_DATA_DIR
+    return create_folder(TICKS_DATA_DIR)
 
 
 def get_model_files_dir():
-    create_folder(MODEL_FILES_DIR)
-    return MODEL_FILES_DIR
+    return create_folder(MODEL_FILES_DIR)
 
 
 def get_live_trade_files_dir():
-    create_folder(LIVE_TRADE_FILES_DIR)
-    return LIVE_TRADE_FILES_DIR
+    return create_folder(LIVE_TRADE_FILES_DIR)
 
 
 def get_temp_dir():
-    create_folder(TEMP_DIR)
-    return TEMP_DIR
+    return create_folder(TEMP_DIR)
