@@ -700,7 +700,7 @@ class IchiCloudStrategy(TradeStrategy):
     default_name = f'ichi-cloud'
 
     def __init__(self, symbol='EURUSD', timeframe='H1', fast_ma_window=7, lots_per_trade=0.2, lstm_seq_len=128,
-                 ichi_settings=(9, 30, 60), profit_noise_percent=0.0012, fast_ma_model_path=None, xgb_model_path=None,
+                 ichi_settings=(9, 30, 60), profit_noise_percent=0.0013, fast_ma_model_path=None, xgb_model_path=None,
                  fast_ma_diff_threshold=0.01, decision_prob_diff_thresh=0.45, bar_buffer_size=300, model_files_path=None,
                  train_data_start_iso=research.TRAIN_DATA_START_ISO, train_data_end_iso=research.TRAIN_DATA_END_ISO,
                  ma_cols=None, pc_cols=None, normalization_groups=None, open_trade_sigs=None, tf_force_cpu=False,
