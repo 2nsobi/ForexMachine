@@ -592,6 +592,9 @@ class TradeStrategy:
             else:
                 print(f'{self.__name} STRATEGY FAILED TO PLACE {TRADE_DECISION_STRINGS[trade_type_int]} ORDER, '
                       f'RETCODE: {trade_resp.retcode}, COMMENT: {trade_resp.comment}')
+        else:
+            print(f'{self.__name} strategy unable to place any more trades, '
+                  f'already at max open trade limit of {self.max_concurrent_trades} trades')
         return False
 
     def close_trade(self, order_ticket):
