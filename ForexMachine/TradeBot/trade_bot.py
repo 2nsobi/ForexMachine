@@ -699,9 +699,9 @@ class TradeStrategy:
 class IchiCloudStrategy(TradeStrategy):
     default_name = f'ichi-cloud'
 
-    def __init__(self, symbol='EURUSD', timeframe='H1', fast_ma_window=7, lots_per_trade=0.2, lstm_seq_len=128,
+    def __init__(self, symbol='EURUSD', timeframe='H1', fast_ma_window=7, lots_per_trade=0.2, model_files_path=None,
                  ichi_settings=(9, 30, 60), profit_noise_percent=0.0013, fast_ma_model_path=None, xgb_model_path=None,
-                 fast_ma_diff_threshold=0.01, decision_prob_diff_thresh=0.45, bar_buffer_size=300, model_files_path=None,
+                 fast_ma_diff_threshold=0.01, decision_prob_diff_thresh=0.45, lstm_seq_len=128, bar_buffer_size=300,
                  train_data_start_iso=research.TRAIN_DATA_START_ISO, train_data_end_iso=research.TRAIN_DATA_END_ISO,
                  ma_cols=None, pc_cols=None, normalization_groups=None, open_trade_sigs=None, tf_force_cpu=False,
                  models_features_names=None, max_concurrent_trades=np.inf, profit_in_quote_currency=True):
@@ -996,6 +996,11 @@ class IchiCloudStrategy(TradeStrategy):
                           f'on classifier probability of {decision_prob}'
                 print(log_msg)
                 self.open_trade(decision_label, log_msg=log_msg)
+            elif self.debug_mode:
+                print(f'{self.strat_name} strategy detected {open_trade_causes} ichimoku signals'
+                      f'\nHowever, will not attempt to open a {TRADE_DECISION_STRINGS[decision_label]} '
+                      f'trade based on classifier probability of {decision_prob} which is less than the '
+                      f'decision_prob_diff_thresh of {self.decision_prob_diff_thresh}')
 
 
 def run_trade_strategy(strategy, strategy_kwargs, base_strategy_kwargs, strat_name, proc_conn, exit_event,
