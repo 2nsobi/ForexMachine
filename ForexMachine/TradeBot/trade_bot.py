@@ -512,6 +512,9 @@ class TradeStrategy:
                 return False
             self.process_new_data(self.__lfg.data_q, self.__lfg.feature_indices, False)
 
+            # save any trades that might have been opened during self.process_new_data()
+            self.save_trades()
+
             next_update_delta = self.get_next_update_delta(latest_bars[-1][0])
             if next_update_delta > 0:
                 if self.debug_mode:
@@ -687,13 +690,16 @@ class TradeStrategy:
     def process_new_data(self, data_q, feature_indices, processing_immediately):
         pass
 
-    def __del__(self):
+    def save_trades(self):
         if self.__trades_filepath is not None:
             if len(self.__trades) > 0:
                 with open(self.__trades_filepath, 'wb') as trades_fp:
                     pickle.dump(self.__trades, trades_fp)
             elif self.__trades_filepath.is_file():
                 os.remove(self.__trades_filepath)
+
+    def __del__(self):
+        self.save_trades()
 
 
 class IchiCloudStrategy(TradeStrategy):
