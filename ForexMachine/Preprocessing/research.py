@@ -16,7 +16,11 @@ from math import isclose
 
 logger = util.Logger.get_instance()
 
-TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2012-01-01', '2021-01-26'
+TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2012-01-01', '2021-03-05'   #'2012-01-01', '2021-01-26'
+TRAIN_DATA_TIMEFRAME = 'H1'
+TRAIN_DATA_SYMBOL = 'EURUSD'
+USE_ALL_TRAINING_DATA = True
+MODEL_PREFIX = None
 
 
 class FeatureGenerator:

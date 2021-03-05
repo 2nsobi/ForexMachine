@@ -707,7 +707,7 @@ class IchiCloudStrategy(TradeStrategy):
 
     def __init__(self, symbol='EURUSD', timeframe='H1', fast_ma_window=7, lots_per_trade=0.2, model_files_path=None,
                  ichi_settings=(9, 30, 60), profit_noise_percent=0.0013, fast_ma_model_path=None, xgb_model_path=None,
-                 fast_ma_diff_threshold=0.01, decision_prob_diff_thresh=0.45, lstm_seq_len=128, bar_buffer_size=300,
+                 fast_ma_diff_threshold=0.00, decision_prob_diff_thresh=0.49, lstm_seq_len=128, bar_buffer_size=300,
                  train_data_start_iso=research.TRAIN_DATA_START_ISO, train_data_end_iso=research.TRAIN_DATA_END_ISO,
                  ma_cols=None, pc_cols=None, normalization_groups=None, open_trade_sigs=None, tf_force_cpu=False,
                  models_features_names=None, max_concurrent_trades=np.inf, profit_in_quote_currency=True):
@@ -790,14 +790,14 @@ class IchiCloudStrategy(TradeStrategy):
             self.model_files_path = util.get_model_files_dir()
 
         if self.fast_ma_model_path is None:
-            self.fast_ma_model_path = self.model_files_path / f'final_{self.symbol}-{self.timeframe}_Bi-LSTM' \
+            self.fast_ma_model_path = self.model_files_path / f'all-data_final_{self.symbol}-{self.timeframe}_Bi-LSTM' \
                                                               f'_{fast_ma_window}-ma_{self.tenkan_period}-' \
                                                               f'{self.kijun_period}-{self.senkou_b_period}-ichi.hdf5'
 
         self.fast_ma_model = tf.keras.models.load_model(self.fast_ma_model_path)
 
         if self.xgb_model_path is None:
-            self.xgb_model_path = self.model_files_path / f'{self.symbol}-{self.timeframe}_0.0082-min_profit_0.2-lots_right-cur_side' \
+            self.xgb_model_path = self.model_files_path / f'all-data_{self.symbol}-{self.timeframe}_0.0082-min_profit_0.2-lots_right-cur_side' \
                                                           f'_{self.tenkan_period}-{self.kijun_period}-{self.senkou_b_period}' \
                                                           f'-cb-tk-tkp-sen-chi-ichi_xgb_classifier.json'
 
