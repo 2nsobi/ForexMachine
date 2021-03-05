@@ -39,10 +39,14 @@ class LiveFeatureGenerator:
             },
             'ichimoku_signals': {
                 'negative_bears': True
+            },
+            'rsi': {
+                'periods': 14
             }
         }
         self.available_indicators_funcs = {
-            'ichimoku': self.add_ichimoku_indicator
+            'ichimoku': self.add_ichimoku_indicator,
+            'rsi': self.add_rsi_indicator
         }
         self.available_features_funcs = {
             'ichimoku_signals': self.add_ichimoku_signals
@@ -76,7 +80,6 @@ class LiveFeatureGenerator:
                     value = self.custom_settings[indicator][setting]
                 indicator_dict[setting] = value
             indicator_dict['func'] = self.available_indicators_funcs[indicator]
-            indicator_dict['processed_bars'] = 0
             self.indicators[indicator] = indicator_dict
 
         for feature in self.features_list:
@@ -91,7 +94,6 @@ class LiveFeatureGenerator:
                     value = self.custom_settings[feature][setting]
                 feature_dict[setting] = value
             feature_dict['func'] = self.available_features_funcs[feature]
-            feature_dict['processed_bars'] = 0
             self.features[feature] = feature_dict
 
         self.lfg_setup = True
@@ -217,6 +219,7 @@ class LiveFeatureGenerator:
                 self.feature_indices[temporal_feat_name] = len(self.feature_indices)
             row.append(temporal_feat_val)
 
+    # calculation: https://school.stockcharts.com/doku.php?id=technical_indicators:ichimoku_cloud
     def add_ichimoku_indicator(self, data_idx):
         row = self.data_q[data_idx]
 
@@ -280,8 +283,6 @@ class LiveFeatureGenerator:
             if key not in self.feature_indices:
                 self.feature_indices[key] = len(self.feature_indices)
             row.append(val)
-
-        self.indicators['ichimoku']['processed_bars'] += 1
 
     def add_ichimoku_signals(self, data_idx):
         row = self.data_q[data_idx]
@@ -351,11 +352,52 @@ class LiveFeatureGenerator:
                     self.feature_indices[key] = len(self.feature_indices)
                 row.append(cross_feature_dict[cross_name][cross_feature])
 
-        self.features['ichimoku_signals']['processed_bars'] += 1
+    # calculation: https://school.stockcharts.com/doku.php?id=technical_indicators:relative_strength_index_rsi
+    def add_rsi_indicator(self, data_idx):
+        rsi = None
+        rsi_periods = self.indicators['rsi']['periods']
+
+        if data_idx >= 1:
+            if 'first_gains' not in self.indicators['rsi']:
+                self.indicators['rsi']['first_gains'] = []
+                self.indicators['rsi']['first_losses'] = []
+            first_gains = self.indicators['rsi']['first_gains']
+            first_losses = self.indicators['rsi']['first_losses']
+
+            change = self.data_q[data_idx][self.feature_indices['Close']] \
+                     - self.data_q[data_idx - 1][self.feature_indices['Close']]
+            gain = loss = 0
+            if change > 0:
+                gain = change
+            else:
+                loss = change * -1
+
+            # only need to keep track of first 'rsi_periods' number of periods to first avg gain/loss calculation
+            if len(first_gains) != rsi_periods:
+                first_gains.append(gain)
+                first_losses.append(loss)
+
+            if len(first_gains) == rsi_periods:
+                if 'last_avg_gain' not in self.indicators['rsi']:
+                    self.indicators['rsi']['last_avg_gain'] = sum(first_gains) / rsi_periods
+                    self.indicators['rsi']['last_avg_loss'] = sum(first_losses) / rsi_periods
+                else:
+                    self.indicators['rsi']['last_avg_gain'] = (self.indicators['rsi']['last_avg_gain']
+                                                               * (rsi_periods - 1) + gain) / rsi_periods
+                    self.indicators['rsi']['last_avg_loss'] = (self.indicators['rsi']['last_avg_loss']
+                                                               * (rsi_periods - 1) + loss) / rsi_periods
+
+                rs = self.indicators['rsi']['last_avg_gain'] / self.indicators['rsi']['last_avg_loss']
+                rsi = 100 - 100 / (1 + rs)
+
+        if 'rsi' not in self.feature_indices:
+            self.feature_indices['rsi'] = len(self.feature_indices)
+        self.data_q[data_idx].append(rsi)
 
 
 if __name__ == '__main__':
     import time
+    import math
     import pandas as pd
     from ForexMachine.Preprocessing import research
 
@@ -375,7 +417,7 @@ if __name__ == '__main__':
         }
     }
 
-    lfg = LiveFeatureGenerator(indicators=['ichimoku'], features=['ichimoku_signals'], utc_offset=2,
+    lfg = LiveFeatureGenerator(indicators=['ichimoku', 'rsi'], features=['ichimoku_signals'], utc_offset=2,
                                custom_settings=custom_settings, q_size=num_bars)
 
     s = time.time()
@@ -434,8 +476,13 @@ if __name__ == '__main__':
                     train_data_val = train_data.iloc[i][train_data.columns.get_loc(col)]
                     matching = True
                     if isinstance(lfg_df_val, (np.floating, float)):
-                        if not np.isclose(lfg_df_val, train_data_val):
-                            matching = False
+                        if col == 'rsi':
+                            # the TA library does not implement rsi correctly for the first value based on stockcharts
+                            if not math.isclose(lfg_df_val, train_data_val, rel_tol=1e-1):
+                                matching = False
+                        else:
+                            if not np.isclose(lfg_df_val, train_data_val):
+                                matching = False
                     else:
                         if lfg_df_val != train_data_val:
                             matching = False

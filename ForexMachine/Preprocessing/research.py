@@ -16,11 +16,12 @@ from math import isclose
 
 logger = util.Logger.get_instance()
 
-TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2012-01-01', '2021-03-05'   #'2012-01-01', '2021-01-26'
+# TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2012-01-01', '2021-03-05'
+TRAIN_DATA_START_ISO, TRAIN_DATA_END_ISO = '2012-01-01', '2021-01-26'
 TRAIN_DATA_TIMEFRAME = 'H1'
 TRAIN_DATA_SYMBOL = 'EURUSD'
 USE_ALL_TRAINING_DATA = True
-MODEL_PREFIX = None
+MODEL_PREFIX = 'with-rsi_'
 
 
 class FeatureGenerator:
@@ -969,12 +970,13 @@ def dummy_and_remove_features(data_df, categories_dict={}, cols_to_remove=[], in
 
         # for some reason mt5 terminal rarely returns bar data from sundays so just remove that feature (day_of_week_6)
         # and remove saturday feature (day_of_week_5) because it is possible to get saturday bars from mt5
-        cols = {'spread', 'rsi', 'month', 'day', 'minute', 'hour', 'year', 'chikou_span_visual', 'chikou_span',
+        cols = {'spread', 'month', 'day', 'minute', 'hour', 'year', 'chikou_span_visual', 'chikou_span',
                 'tk_cross_bull_length', 'tk_cross_bear_length',
                 'tk_price_cross_bull_length', 'tk_price_cross_bear_length',
                 'senkou_cross_bull_length', 'senkou_cross_bear_length',
                 'chikou_cross_bull_length', 'chikou_cross_bear_length',
-                'senkou_a_visual', 'senkou_b_visual', 'day_of_week_5', 'day_of_week_6'}
+                'senkou_a_visual', 'senkou_b_visual', 'day_of_week_5', 'day_of_week_6',  # }
+                'rsi'}
         # 'kijun_base','tenken_conv', 'senkou_a', 'senkou_b'}
 
         if not keep_datetime:
