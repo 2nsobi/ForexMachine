@@ -1005,8 +1005,9 @@ class IchiCloudStrategy(TradeStrategy):
             elif self.debug_mode:
                 print(f'{self.strat_name} strategy detected {open_trade_causes} ichimoku signals'
                       f'\nHowever, will not attempt to open a {TRADE_DECISION_STRINGS[decision_label]} '
-                      f'trade based on classifier probability of {decision_prob} which is less than the '
-                      f'decision_prob_diff_thresh of {self.decision_prob_diff_thresh}')
+                      f'trade based on classifier probability of {decision_prob} which has a probability diff of '
+                      f'{decision_prob_diff} which is greater than the decision_prob_diff_thresh of '
+                      f'{self.decision_prob_diff_thresh}')
 
 
 def run_trade_strategy(strategy, strategy_kwargs, base_strategy_kwargs, strat_name, proc_conn, exit_event,
