@@ -359,8 +359,9 @@ class TradeStrategy:
         if self.detect_utc_offset:
             self.utc_offset = self.get_server_utc_offset()
         if self.utc_offset is None:
-            logger.error('UTC offset is not None')
+            logger.error('UTC offset is None')
             return False
+        print(f'UTC offset of {self.__name} strategy: {self.utc_offset}')
 
         self.strategy_process_setup()
 
